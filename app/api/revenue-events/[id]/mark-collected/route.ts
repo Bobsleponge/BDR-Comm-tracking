@@ -50,7 +50,7 @@ export async function PATCH(
     }
 
     // Supabase mode
-    const supabase = await createClient();
+    const supabase = await createClient() as any;
 
     // Get revenue event
     const { data: event, error: eventError } = await (supabase
@@ -85,4 +85,6 @@ export async function PATCH(
     return apiError(error.message || 'Failed to mark revenue event as collected', 500);
   }
 }
+
+
 

@@ -105,7 +105,7 @@ async function createTestDeal() {
     serviceIds.push(serviceId);
 
     const commission = calculateServiceCommission(
-      serviceData.billing_type,
+      serviceData.billing_type as 'one_off' | 'quarterly' | 'mrr' | 'deposit',
       serviceData.unit_price || 0,
       serviceData.monthly_price || null,
       serviceData.quarterly_price || null,

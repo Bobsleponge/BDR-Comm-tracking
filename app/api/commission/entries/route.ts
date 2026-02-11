@@ -12,6 +12,11 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get('status');
     const month = searchParams.get('month');
     const payableMonth = searchParams.get('payable_month'); // Format: YYYY-MM
+    
+    // Pagination parameters
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
+    const limit = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '100', 10)));
+    const offset = (page - 1) * limit;
 
     const { isAdmin } = await import('@/lib/utils/auth');
     const isUserAdmin = await isAdmin();
@@ -78,9 +83,39 @@ export async function GET(request: NextRequest) {
         params.push(payableMonth);
       }
 
-      query += ' ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month) DESC LIMIT 1000';
+      query += ' ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month) DESC LIMIT ? OFFSET ?';
+      params.push(limit, offset);
 
       const entries = db.prepare(query).all(...params) as any[];
+      
+      // Get total count for pagination metadata
+      let countQuery = `
+        SELECT COUNT(*) as total
+        FROM commission_entries ce
+        INNER JOIN deals d ON ce.deal_id = d.id
+        WHERE d.cancellation_date IS NULL
+      `;
+      const countParams: any[] = [];
+      
+      if (targetBdrId) {
+        countQuery += ' AND ce.bdr_id = ?';
+        countParams.push(targetBdrId);
+      }
+      if (status) {
+        countQuery += ' AND ce.status = ?';
+        countParams.push(status);
+      }
+      if (month) {
+        countQuery += ' AND ce.month = ?';
+        countParams.push(month);
+      }
+      if (payableMonth) {
+        countQuery += ' AND strftime("%Y-%m", ce.payable_date) = ?';
+        countParams.push(payableMonth);
+      }
+      
+      const totalResult = db.prepare(countQuery).get(...countParams) as { total: number };
+      const total = totalResult?.total || 0;
 
       // Transform results to match expected format (only include essential fields)
       const entriesWithRelations = entries.map(entry => ({
@@ -104,7 +139,15 @@ export async function GET(request: NextRequest) {
         } : null,
       }));
 
-      return apiSuccess(entriesWithRelations, 200, { cache: 30 }); // Increased cache to 30 seconds
+      return apiSuccess({
+        data: entriesWithRelations,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
     }
 
     // Supabase mode - exclude entries from cancelled deals
@@ -146,8 +189,11 @@ export async function GET(request: NextRequest) {
       query = query.like('payable_date', `${payableMonth}%`);
     }
 
+    // Add pagination
+    query = query.range(offset, offset + limit - 1);
+
     // Execute query with explicit type casting
-    const { data, error } = (await query) as { data: any[] | null; error: any };
+    const { data, error, count } = (await query) as { data: any[] | null; error: any; count?: number };
 
     if (error) {
       if (process.env.NODE_ENV === 'development') {
@@ -176,7 +222,24 @@ export async function GET(request: NextRequest) {
       return entry;
     });
 
-    return apiSuccess(transformedData, 200, { cache: 10 }); // Cache for 10 seconds
+    // Get total count if not provided by Supabase
+    let total = count;
+    if (total === undefined) {
+      // Need to get count separately
+      const countQuery = query.select('id', { count: 'exact', head: true });
+      const { count: totalCount } = (await countQuery) as { count: number | null };
+      total = totalCount || transformedData.length;
+    }
+    
+    return apiSuccess({
+      data: transformedData,
+      pagination: {
+        page,
+        limit,
+        total: total || transformedData.length,
+        totalPages: Math.ceil((total || transformedData.length) / limit),
+      },
+      }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
   } catch (error: any) {
     if (process.env.NODE_ENV === 'development') {
       console.error('Commission entries API exception:', error);

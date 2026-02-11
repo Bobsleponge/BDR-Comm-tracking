@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, requireAdmin, canAccessBdr } from '@/lib/utils/api-helpers';
 import { createRevenueEvent, processRevenueEvent } from '@/lib/commission/revenue-events';
 import { parseISO } from 'date-fns';
+import { revenueEventSchema } from '@/lib/commission/validators';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -148,6 +149,16 @@ export async function POST(request: NextRequest) {
     await requireAdmin();
 
     const body = await request.json();
+    
+    // Validate input
+    const validationResult = revenueEventSchema.safeParse(body);
+    if (!validationResult.success) {
+      return apiError(
+        `Validation error: ${validationResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`,
+        400
+      );
+    }
+    
     const {
       deal_id,
       service_id,
@@ -157,22 +168,7 @@ export async function POST(request: NextRequest) {
       billing_type,
       payment_stage,
       commissionable = true,
-    } = body;
-
-    // Validate required fields
-    if (!deal_id || !bdr_id || !amount_collected || !collection_date || !billing_type || !payment_stage) {
-      return apiError('Missing required fields', 400);
-    }
-
-    // Validate billing_type
-    if (!['one_off', 'monthly', 'quarterly', 'renewal'].includes(billing_type)) {
-      return apiError('Invalid billing_type', 400);
-    }
-
-    // Validate payment_stage
-    if (!['invoice', 'completion', 'renewal'].includes(payment_stage)) {
-      return apiError('Invalid payment_stage', 400);
-    }
+    } = validationResult.data;
 
     const collectionDate = parseISO(collection_date);
 
@@ -204,4 +200,6 @@ export async function POST(request: NextRequest) {
     return apiError(error.message || 'Failed to create revenue event', 500);
   }
 }
+
+
 

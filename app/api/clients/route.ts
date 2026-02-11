@@ -1,16 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
-import { z } from 'zod';
-
-const clientSchema = z.object({
-  name: z.string().min(1, 'Client name is required'),
-  company: z.string().optional().nullable(),
-  email: z.string().email('Invalid email address').optional().nullable(),
-  phone: z.string().optional().nullable(),
-  address: z.string().optional().nullable(),
-  notes: z.string().optional().nullable(),
-});
+import { clientSchema } from '@/lib/commission/validators';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -19,6 +10,11 @@ export async function GET(request: NextRequest) {
     await requireAuth();
     const { searchParams } = new URL(request.url);
     const search = searchParams.get('search');
+    
+    // Pagination parameters
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
+    const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit') || '50', 10)));
+    const offset = (page - 1) * limit;
 
     if (USE_LOCAL_DB) {
       // Local DB mode - direct SQLite query (much faster)
@@ -34,10 +30,32 @@ export async function GET(request: NextRequest) {
         params.push(searchPattern, searchPattern, searchPattern);
       }
 
-      query += ' ORDER BY name ASC';
+      // Get total count
+      let countQuery = 'SELECT COUNT(*) as total FROM clients';
+      const countParams: any[] = [];
+      
+      if (search) {
+        countQuery += ' WHERE name LIKE ? OR company LIKE ? OR email LIKE ?';
+        const searchPattern = `%${search}%`;
+        countParams.push(searchPattern, searchPattern, searchPattern);
+      }
+      
+      const totalResult = db.prepare(countQuery).get(...countParams) as { total: number };
+      const total = totalResult?.total || 0;
+      
+      query += ' ORDER BY name ASC LIMIT ? OFFSET ?';
+      params.push(limit, offset);
 
       const clients = db.prepare(query).all(...params) as any[];
-      return apiSuccess(clients, 200, { cache: 60 }); // Increased cache - clients don't change often
+      return apiSuccess({
+        data: clients,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      }, 200, { cache: 60 }); // Increased cache - clients don't change often
     }
 
     // Supabase mode
@@ -51,7 +69,10 @@ export async function GET(request: NextRequest) {
       query = query.or(`name.ilike.%${search}%,company.ilike.%${search}%,email.ilike.%${search}%`);
     }
 
-    const { data, error } = await query;
+    // Add pagination
+    query = query.range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query as { data: any[] | null; error: any; count?: number };
 
     if (error) {
       console.error('Clients query error:', error);
@@ -61,7 +82,22 @@ export async function GET(request: NextRequest) {
       return apiError(error.message, 500);
     }
 
-    return apiSuccess(data || [], 200, { cache: 10 });
+    let total = count;
+    if (total === undefined) {
+      const countQuery = query.select('id', { count: 'exact', head: true });
+      const { count: totalCount } = (await countQuery) as { count: number | null };
+      total = totalCount || (data?.length || 0);
+    }
+    
+    return apiSuccess({
+      data: data || [],
+      pagination: {
+        page,
+        limit,
+        total: total || (data?.length || 0),
+        totalPages: Math.ceil((total || (data?.length || 0)) / limit),
+      },
+    }, 200, { cache: 10 });
   } catch (error: any) {
     console.error('Clients API error:', error);
     if (error.message === 'Unauthorized') {

@@ -32,7 +32,9 @@ export default function ClientDetailPage() {
     try {
       const res = await fetch(`/api/clients/${params.id}`);
       if (!res.ok) throw new Error('Failed to fetch client');
-      const data = await res.json();
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+      const data = await safeJsonParse(res);
+      if (data.error) throw new Error(data.error);
       setClient(data);
     } catch (err: any) {
       setError(err.message);
@@ -45,8 +47,11 @@ export default function ClientDetailPage() {
     try {
       const res = await fetch(`/api/clients/${params.id}/deals`);
       if (res.ok) {
-        const data = await res.json();
-        setDeals(data);
+        const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+        const data = await safeJsonParse(res);
+        if (!data.error) {
+          setDeals(data);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch deals:', err);

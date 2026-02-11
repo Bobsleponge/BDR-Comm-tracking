@@ -7,3 +7,5 @@ CREATE INDEX IF NOT EXISTS idx_deal_services_completion_date ON deal_services(co
 
 
 
+
+

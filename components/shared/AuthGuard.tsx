@@ -6,9 +6,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import useSWR from 'swr';
 
 const fetcher = async (url: string) => {
-  const res = await fetch(url, { credentials: 'include' });
-  const data = await res.json();
-  return data;
+  try {
+    const res = await fetch(url, { credentials: 'include' });
+    const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+    const data = await safeJsonParse(res);
+    return data;
+  } catch (error) {
+    throw error;
+  }
 };
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {

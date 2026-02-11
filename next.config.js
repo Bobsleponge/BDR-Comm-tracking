@@ -19,11 +19,12 @@ const nextConfig = {
     unoptimized: true, // Disable image optimization for faster builds
   },
   // Performance optimizations
-  swcMinify: true,
+  // swcMinify is enabled by default in Next.js 15, no need to specify
   // Enable compression
   compress: true,
   // Add output configuration for better performance
-  output: 'standalone', // Reduces bundle size
+  // Only use standalone in production builds, not in dev mode
+  ...(process.env.NODE_ENV === 'production' ? { output: 'standalone' } : {}), // Reduces bundle size
   // Optimize bundle splitting
   webpack: (config, { isServer }) => {
     if (!isServer) {

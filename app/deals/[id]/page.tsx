@@ -122,7 +122,7 @@ export default function DealDetailPage() {
                 <CardTitle>Edit Deal Information</CardTitle>
               </CardHeader>
               <CardContent>
-                <DealForm dealId={deal.id} initialData={deal} />
+                <DealForm dealId={deal.id} initialData={deal} baseCommissionRate={baseCommissionRate} />
                 <Button
                   variant="ghost"
                   onClick={() => setEditing(false)}

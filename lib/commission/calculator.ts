@@ -19,8 +19,22 @@ export function calculateBaseCommission(
 }
 
 /**
- * @deprecated This function is deprecated. Use revenue events system instead.
- * Commission is now calculated strictly on revenue collection events, not contract value or smoothed schedules.
+ * @deprecated This function is deprecated and will be removed in a future version.
+ * 
+ * **Migration Guide:**
+ * - Old: Commission was calculated upfront based on deal value and spread over months
+ * - New: Commission is calculated when revenue is actually collected (revenue events system)
+ * 
+ * **Replacement:**
+ * Use `createRevenueEventsForDeal()` from `@/lib/commission/revenue-events` instead.
+ * This creates revenue events based on actual billing cycles, and commission entries
+ * are created when revenue is collected.
+ * 
+ * **Why deprecated:**
+ * The old system calculated commission based on contract value, which doesn't match
+ * actual revenue collection. The new system ensures commission is only earned when
+ * revenue is actually received.
+ * 
  * Generate monthly payout schedule for a deal
  * @param dealId - The deal ID
  * @param bdrId - The BDR rep ID

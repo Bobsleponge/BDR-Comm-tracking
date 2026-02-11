@@ -20,7 +20,9 @@ export default function CommissionForecastPage() {
       try {
         const res = await fetch('/api/commission/forecast?months=12');
         if (!res.ok) throw new Error('Failed to fetch forecast');
-        const data = await res.json();
+        const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+        const data = await safeJsonParse(res);
+        if (data.error) throw new Error(data.error);
         setForecast(data);
       } catch (err: any) {
         setError(err.message);
@@ -67,6 +69,8 @@ export default function CommissionForecastPage() {
     </AuthGuard>
   );
 }
+
+
 
 
 

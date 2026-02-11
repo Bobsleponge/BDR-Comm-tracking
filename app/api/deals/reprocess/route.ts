@@ -50,14 +50,17 @@ export async function POST(request: NextRequest) {
     }
 
     // Supabase mode
-    const supabase = await createClient();
+    const supabase = await createClient() as any;
 
     // Check if deal exists
-    const { data: deal, error: dealError } = await (supabase
+    const dealResult = await supabase
       .from('deals')
       .select('*')
       .eq('id', dealId)
-      .single() as any);
+      .single();
+    
+    const deal = dealResult.data;
+    const dealError = dealResult.error;
 
     if (dealError || !deal) {
       return apiError('Deal not found', 404);
@@ -67,27 +70,29 @@ export async function POST(request: NextRequest) {
     await createRevenueEventsForDeal(dealId);
 
     // Process all revenue events
-    const { data: revenueEvents } = await (supabase
+    const eventsResult = await supabase
       .from('revenue_events')
       .select('id')
-      .eq('deal_id', dealId) as any);
+      .eq('deal_id', dealId);
 
-    if (revenueEvents) {
-      for (const event of revenueEvents) {
-        try {
-          await processRevenueEvent(event.id);
-        } catch (error) {
-          console.error(`Error processing revenue event ${event.id}:`, error);
-        }
+    const revenueEvents = eventsResult.data || [];
+
+    for (const event of revenueEvents) {
+      try {
+        await processRevenueEvent(event.id);
+      } catch (error) {
+        console.error(`Error processing revenue event ${event.id}:`, error);
       }
     }
 
     return apiSuccess({ 
       message: 'Deal reprocessed successfully', 
-      eventsProcessed: revenueEvents?.length || 0 
+      eventsProcessed: revenueEvents.length 
     });
   } catch (error: any) {
     return apiError(error.message, 500);
   }
 }
+
+
 

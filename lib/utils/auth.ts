@@ -1,3 +1,5 @@
+import 'server-only';
+
 import { createClient } from '@/lib/supabase/server';
 import { getLocalUser } from '@/lib/db/local-auth';
 

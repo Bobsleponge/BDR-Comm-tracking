@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download } from 'lucide-react';
 
 interface CommissionBreakdownEntry {
   id: string;
@@ -21,6 +21,7 @@ interface CommissionBreakdownEntry {
     id: string;
     clientName: string;
     serviceType: string;
+    closeDate: string | null;
   };
   service: {
     id: string;
@@ -31,6 +32,7 @@ interface CommissionBreakdownEntry {
     amountCollected: number;
     collectionDate: string;
     paymentStage: string;
+    billingType?: string;
   } | null;
 }
 
@@ -97,6 +99,44 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
     return format(date, 'MMMM yyyy');
   };
 
+  const handleExportMonth = async (month: string) => {
+    try {
+      const exportUrl = `/api/commission/export?payable_month=${month}`;
+      const res = await fetch(exportUrl, {
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to export commissions');
+      }
+
+      // Get the blob and trigger download
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      
+      // Extract filename from Content-Disposition header or use default
+      const contentDisposition = res.headers.get('Content-Disposition');
+      let filename = `commissions-${month}.xlsx`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`Error exporting: ${err.message}`);
+    }
+  };
+
   if (breakdown.length === 0) {
     return (
       <Card>
@@ -142,12 +182,6 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                   <SelectValue placeholder="All Billing Types" />
                 </SelectTrigger>
                 <SelectContent>
-                  {/* #region agent log */}
-                  {(() => {
-                    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'components/commission/CommissionBreakdown.tsx:145',message:'Rendering SelectItem for billing type filter',data:{billingTypeFilter},timestamp:Date.now(),sessionId:'debug-session',runId:'initial',hypothesisId:'B'})}).catch(()=>{});
-                    return null;
-                  })()}
-                  {/* #endregion */}
                   <SelectItem value="all">All Billing Types</SelectItem>
                   <SelectItem value="one_off">One-Off</SelectItem>
                   <SelectItem value="monthly">Monthly (MRR)</SelectItem>
@@ -209,11 +243,22 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                       </div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-xl font-bold">
-                      ${monthData.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  <div className="flex items-center gap-4">
+                    <div className="text-right">
+                      <div className="text-xl font-bold">
+                        ${monthData.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      <span className="text-xs text-muted-foreground">Claim this month</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">Claim this month</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleExportMonth(monthData.month)}
+                      className="flex items-center gap-2"
+                    >
+                      <Download className="h-4 w-4" />
+                      Export
+                    </Button>
                   </div>
                 </div>
               </CardHeader>
@@ -226,7 +271,7 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                           <TableHead>Client / Deal</TableHead>
                           <TableHead>Service</TableHead>
                           <TableHead>Payment Type</TableHead>
-                          <TableHead>Collection Date</TableHead>
+                          <TableHead>Close Date</TableHead>
                           <TableHead>Payable Date</TableHead>
                           <TableHead>Revenue</TableHead>
                           <TableHead>Commission</TableHead>
@@ -249,21 +294,38 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                                     {(entry.service.billingType === 'quarterly' || entry.service.billingType === 'monthly') && (
                                       <Badge variant="outline">Recurring</Badge>
                                     )}
+                                    {entry.revenueEvent?.billingType === 'renewal' && (
+                                      <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                                        Renewal Uplift
+                                      </Badge>
+                                    )}
                                   </div>
                                 </>
+                              ) : entry.revenueEvent?.billingType === 'renewal' ? (
+                                <div>
+                                  <div className="font-medium">Renewal Uplift</div>
+                                  <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200 mt-1">
+                                    Renewal
+                                  </Badge>
+                                </div>
                               ) : (
                                 <span className="text-sm text-muted-foreground">N/A</span>
                               )}
                             </TableCell>
                             <TableCell>
-                              {getPaymentStageBadge(entry.revenueEvent?.paymentStage)}
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {entry.revenueEvent?.billingType === 'renewal' && (
+                                  <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                                    Renewal
+                                  </Badge>
+                                )}
+                                {getPaymentStageBadge(entry.revenueEvent?.paymentStage)}
+                              </div>
                             </TableCell>
                             <TableCell>
-                              {entry.revenueEvent?.collectionDate
-                                ? format(parseISO(entry.revenueEvent.collectionDate), 'MMM dd, yyyy')
-                                : entry.accrualDate
-                                  ? format(parseISO(entry.accrualDate), 'MMM dd, yyyy')
-                                  : 'N/A'}
+                              {entry.deal?.closeDate
+                                ? format(parseISO(entry.deal.closeDate), 'MMM dd, yyyy')
+                                : 'N/A'}
                             </TableCell>
                             <TableCell>
                               {entry.payableDate

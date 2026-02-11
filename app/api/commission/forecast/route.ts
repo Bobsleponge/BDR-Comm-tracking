@@ -96,11 +96,11 @@ export async function GET(request: NextRequest) {
     }
 
     // Supabase mode - base forecast on scheduled revenue events
-    const supabase = await createClient();
+    const supabase = await createClient() as any;
     const today = new Date().toISOString().split('T')[0];
 
     // Get scheduled revenue events and calculate expected commission
-    const revenueEventsQuery = (supabase as any)
+    const revenueEventsResult = await supabase
       .from('revenue_events')
       .select('collection_date, amount_collected, billing_type, commissionable, deal_services(commission_rate), deals(service_type, cancellation_date)')
       .eq('bdr_id', targetBdrId)
@@ -109,22 +109,24 @@ export async function GET(request: NextRequest) {
       .is('deals.cancellation_date', null)
       .order('collection_date', { ascending: true });
     
-    const { data: revenueEvents, error: eventsError } = (await revenueEventsQuery) as { data: any[] | null; error: any };
-
-    if (eventsError) {
+    if (revenueEventsResult.error) {
       if (process.env.NODE_ENV === 'development') {
-        console.error('Commission forecast API error:', eventsError);
+        console.error('Commission forecast API error:', revenueEventsResult.error);
       }
       return apiError('Failed to fetch revenue events for forecast', 500);
     }
 
+    const revenueEvents = revenueEventsResult.data || [];
+
     // Get commission rules
-    const { data: rules } = await (supabase
+    const rulesResult = await supabase
       .from('commission_rules')
       .select('*')
       .order('updated_at', { ascending: false })
       .limit(1)
-      .single() as any);
+      .single();
+    
+    const rules = rulesResult.data;
     
     const baseRate = rules?.base_rate || 0.025;
 
@@ -139,7 +141,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Calculate commission for each revenue event
-    (revenueEvents || []).forEach((event: any) => {
+    revenueEvents.forEach((event: any) => {
       const collectionDate = new Date(event.collection_date);
       const monthKey = format(startOfMonth(collectionDate), 'yyyy-MM-dd');
       

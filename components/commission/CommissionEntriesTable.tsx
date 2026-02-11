@@ -114,10 +114,20 @@ export function CommissionEntriesTable({
                         </div>
                         <div className="text-xs text-muted-foreground">
                           {serviceName} {revenueEvent && `($${revenueEvent.amount_collected.toLocaleString()})`}
+                          {revenueEvent?.billing_type === 'renewal' && (
+                            <span className="ml-1 text-purple-600">• Renewal Uplift</span>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell>
-                        {getPaymentStageBadge(revenueEvent?.payment_stage)}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {revenueEvent?.billing_type === 'renewal' && (
+                            <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                              Renewal
+                            </Badge>
+                          )}
+                          {getPaymentStageBadge(revenueEvent?.payment_stage)}
+                        </div>
                       </TableCell>
                       <TableCell>
                         {entry.accrual_date 

@@ -23,7 +23,8 @@ interface Client {
 
 const fetcher = async (url: string) => {
   const res = await fetch(url, { credentials: 'include' });
-  const data = await res.json();
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+  const data = await safeJsonParse(res);
   if (!res.ok || data.error) {
     throw new Error(data.error || `Failed to fetch: ${res.statusText}`);
   }
@@ -48,11 +49,24 @@ export default function ClientsPage() {
     ? `/api/clients?search=${encodeURIComponent(debouncedSearch)}`
     : '/api/clients';
 
-  const { data: clients = [], error, isLoading: loading } = useSWR<Client[]>(url, fetcher, {
+  const { data: clientsRaw, error, isLoading: loading } = useSWR<any>(url, fetcher, {
     revalidateOnFocus: false,
     revalidateOnReconnect: true,
     dedupingInterval: 5000,
   });
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/clients/page.tsx:54',message:'clientsRaw value check',data:{type:typeof clientsRaw,isArray:Array.isArray(clientsRaw),hasData:!!clientsRaw?.data,hasPagination:!!clientsRaw?.pagination,keys:clientsRaw?Object.keys(clientsRaw):null},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  // Extract clients array from paginated response
+  const clients: Client[] = Array.isArray(clientsRaw) 
+    ? clientsRaw 
+    : (clientsRaw?.data || []);
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/clients/page.tsx:62',message:'clients after extraction',data:{type:typeof clients,isArray:Array.isArray(clients),length:clients?.length},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
 
   if (loading) {
     return (
@@ -119,6 +133,12 @@ export default function ClientsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
+                      {/* #region agent log */}
+                      {(() => {
+                        fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/clients/page.tsx:123',message:'Before map - clients check',data:{type:typeof clients,isArray:Array.isArray(clients),hasMap:typeof clients?.map === 'function'},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+                        return null;
+                      })()}
+                      {/* #endregion */}
                       {clients.map((client) => (
                         <TableRow key={client.id}>
                           <TableCell className="font-medium">{client.name}</TableCell>

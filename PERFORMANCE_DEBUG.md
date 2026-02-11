@@ -118,3 +118,5 @@ If issues persist:
 3. Check browser DevTools Network tab for slow API calls
 4. Check server console for errors
 
+
+

@@ -1,5 +1,5 @@
 import { getLocalDB } from '../lib/db/local-db';
-import { scheduleCommissionPayouts } from '../lib/commission/scheduler';
+import { createRevenueEventsForDeal, processRevenueEvent } from '../lib/commission/revenue-events';
 
 async function generateMissingCommissions() {
   const db = getLocalDB();
@@ -20,8 +20,28 @@ async function generateMissingCommissions() {
   for (const deal of deals) {
     try {
       console.log(`Generating commission entries for deal: ${deal.id} (${deal.client_name})`);
-      await scheduleCommissionPayouts(deal.id);
-      console.log(`✓ Successfully generated commission entries for ${deal.client_name}`);
+      
+      // Create revenue events for the deal
+      await createRevenueEventsForDeal(deal.id);
+      
+      // Process revenue events that have been collected (collection_date <= today)
+      const today = new Date().toISOString().split('T')[0];
+      const revenueEvents = db.prepare(`
+        SELECT id FROM revenue_events 
+        WHERE deal_id = ? AND collection_date <= ?
+      `).all(deal.id, today) as Array<{ id: string }>;
+      
+      let processedCount = 0;
+      for (const event of revenueEvents) {
+        try {
+          await processRevenueEvent(event.id);
+          processedCount++;
+        } catch (error: any) {
+          console.error(`  Error processing revenue event ${event.id}:`, error.message);
+        }
+      }
+      
+      console.log(`✓ Successfully generated ${processedCount} commission entries for ${deal.client_name}`);
     } catch (error: any) {
       console.error(`✗ Error generating commission for ${deal.client_name}:`, error.message);
     }
@@ -31,4 +51,6 @@ async function generateMissingCommissions() {
 }
 
 generateMissingCommissions().catch(console.error);
+
+
 

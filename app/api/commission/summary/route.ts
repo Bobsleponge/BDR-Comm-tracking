@@ -59,7 +59,7 @@ export async function GET(request: NextRequest) {
         accrued: Number(accrued.toFixed(2)),
         cancelled: Number(cancelled.toFixed(2)),
         total: Number((earned + pending).toFixed(2)),
-      }, 200, { cache: 30 }); // Cache for 30 seconds
+      }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
     }
 
     // Supabase mode - exclude entries from cancelled deals
@@ -112,7 +112,7 @@ export async function GET(request: NextRequest) {
       accrued: Number(accrued.toFixed(2)),
       cancelled: Number(cancelled.toFixed(2)),
       total: Number((earned + pending).toFixed(2)),
-    }, 200, { cache: 30 }); // Cache for 30 seconds
+    }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
   } catch (error: any) {
     const errorMessage = error.message || 'Unauthorized';
     if (process.env.NODE_ENV === 'development') {

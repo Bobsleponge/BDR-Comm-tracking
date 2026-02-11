@@ -22,7 +22,26 @@ export async function batchRequests(requests: BatchedRequest[]): Promise<Record<
           body: JSON.stringify(req.body),
         }),
       });
-      const data = await response.json();
+      
+      // Check if response has content before parsing JSON
+      const contentType = response.headers.get('content-type');
+      const text = await response.text();
+      
+      let data: any;
+      if (text && contentType?.includes('application/json')) {
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error(`Invalid JSON response: ${text.substring(0, 100)}`);
+        }
+      } else if (text) {
+        // Non-JSON response
+        data = { error: text || `Failed: ${response.statusText}` };
+      } else {
+        // Empty response
+        data = { error: `Empty response: ${response.statusText}` };
+      }
+      
       if (!response.ok || data.error) {
         throw new Error(data.error || `Failed: ${response.statusText}`);
       }
@@ -42,4 +61,6 @@ export async function batchRequests(requests: BatchedRequest[]): Promise<Record<
 
   return batched;
 }
+
+
 

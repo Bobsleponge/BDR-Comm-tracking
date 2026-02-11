@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { AuthGuard } from '@/components/shared/AuthGuard';
 import { Layout } from '@/components/shared/Layout';
+import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { exportDealsToCSV } from '@/lib/utils/csv-export';
@@ -31,7 +32,15 @@ interface Deal {
   };
 }
 
-const fetcher = (url: string) => fetch(url, { credentials: 'include' }).then(res => res.json());
+const fetcher = async (url: string) => {
+  const res = await fetch(url, { credentials: 'include' });
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+  const data = await safeJsonParse(res);
+  if (!res.ok || data.error) {
+    throw new Error(data.error || 'Failed to fetch');
+  }
+  return data;
+};
 
 export default function DealsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -41,11 +50,24 @@ export default function DealsPage() {
 
   // Use SWR for data fetching with automatic caching
   const url = statusFilter === 'all' ? '/api/deals' : `/api/deals?status=${statusFilter}`;
-  const { data: deals = [], error, isLoading: loading, mutate } = useSWR<Deal[]>(url, fetcher, {
-    revalidateOnFocus: false, // Don't refetch on window focus
+  const { data: dealsRaw, error, isLoading: loading, mutate } = useSWR<any>(url, fetcher, {
+    revalidateOnFocus: true, // Refetch on window focus to get fresh data
     revalidateOnReconnect: true,
-    dedupingInterval: 10000, // Dedupe requests within 10 seconds
+    dedupingInterval: 5000, // Reduce dedupe interval to 5 seconds
   });
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:56',message:'dealsRaw value check',data:{type:typeof dealsRaw,isArray:Array.isArray(dealsRaw),hasData:!!dealsRaw?.data,hasPagination:!!dealsRaw?.pagination,keys:dealsRaw?Object.keys(dealsRaw):null},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  // Extract deals array from paginated response
+  const deals: Deal[] = Array.isArray(dealsRaw) 
+    ? dealsRaw 
+    : (dealsRaw?.data || []);
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:64',message:'deals after extraction',data:{type:typeof deals,isArray:Array.isArray(deals),length:deals?.length},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
 
   // Fetch admin status once
   useSWR('/api/auth/user', fetcher, {
@@ -58,32 +80,49 @@ export default function DealsPage() {
   });
 
   const handleDelete = async (dealId: string) => {
+    if (!dealId) {
+      alert('Invalid deal ID');
+      return;
+    }
+
     if (!confirm('Are you sure you want to delete this deal? This action cannot be undone.')) {
       return;
     }
 
     setDeleting(dealId);
     try {
-      // Optimistic update - remove from UI immediately
-      mutate(deals.filter(d => d.id !== dealId), false);
-
       const res = await fetch(`/api/deals/${dealId}`, {
         method: 'DELETE',
+        credentials: 'include',
       });
 
       if (!res.ok) {
-        // Revert on error
-        mutate();
+        // Revert on error and refresh from server
         const errorData = await res.json();
+        
+        // If deal not found, it might have been deleted already - just refresh the list
+        if (errorData.error?.includes('not found')) {
+          await mutate(); // Refresh from server
+          return; // Don't show error for already-deleted deals
+        }
+        
+        // For other errors, show error
         throw new Error(errorData.error || 'Failed to delete deal');
       }
 
-      // Revalidate to ensure consistency
-      mutate();
+      // Delete succeeded - immediately update local cache to remove the deal
+      mutate(deals.filter(d => d.id !== dealId), false);
+      
+      // Then force a fresh fetch from server to ensure consistency
+      // Add a small delay to ensure the database has processed the delete
+      setTimeout(async () => {
+        await mutate();
+      }, 100);
     } catch (err: any) {
       // Revert on error
       mutate();
-      alert(err.message);
+      console.error('Delete error:', err);
+      alert(err.message || 'Failed to delete deal');
     } finally {
       setDeleting(null);
     }
@@ -97,6 +136,9 @@ export default function DealsPage() {
 
   // Separate deals into active and cancelled
   // Apply status filter to active deals, but always show all cancelled deals
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:126',message:'Before filter - deals check',data:{type:typeof deals,isArray:Array.isArray(deals),hasFilter:typeof deals?.filter === 'function'},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   const allActiveDeals = deals.filter(deal => !deal.cancellation_date);
   const cancelledDeals = deals.filter(deal => deal.cancellation_date);
   
@@ -167,17 +209,15 @@ export default function DealsPage() {
                           <Link href={`/deals/${deal.id}`}>
                             <Button variant="ghost" size="sm">View</Button>
                           </Link>
-                          {isAdmin && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDelete(deal.id)}
-                              disabled={deleting === deal.id}
-                              className="text-destructive hover:text-destructive"
-                            >
-                              {deleting === deal.id ? 'Deleting...' : 'Delete'}
-                            </Button>
-                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDelete(deal.id)}
+                            disabled={deleting === deal.id}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            {deleting === deal.id ? 'Deleting...' : 'Delete'}
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -211,8 +251,9 @@ export default function DealsPage() {
   }
 
   return (
-    <AuthGuard>
-      <Layout>
+    <ErrorBoundary>
+      <AuthGuard>
+        <Layout>
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-6 flex justify-between items-center">
             <h2 className="text-2xl font-bold">Deals</h2>
@@ -254,6 +295,7 @@ export default function DealsPage() {
         </div>
       </Layout>
     </AuthGuard>
+    </ErrorBoundary>
   );
 }
 

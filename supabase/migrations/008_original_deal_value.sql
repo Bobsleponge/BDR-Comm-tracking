@@ -7,3 +7,5 @@ COMMENT ON COLUMN deals.original_deal_value IS 'Manual entry of original deal va
 
 
 
+
+

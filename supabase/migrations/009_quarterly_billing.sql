@@ -21,3 +21,5 @@ COMMENT ON COLUMN deal_services.contract_quarters IS 'Number of quarters in the 
 
 
 
+
+

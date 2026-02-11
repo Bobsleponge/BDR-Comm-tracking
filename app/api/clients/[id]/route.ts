@@ -1,16 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
-import { z } from 'zod';
-
-const clientSchema = z.object({
-  name: z.string().min(1, 'Client name is required').optional(),
-  company: z.string().optional().nullable(),
-  email: z.string().email('Invalid email address').optional().nullable(),
-  phone: z.string().optional().nullable(),
-  address: z.string().optional().nullable(),
-  notes: z.string().optional().nullable(),
-});
+import { clientUpdateSchema } from '@/lib/commission/validators';
 
 export async function GET(
   request: NextRequest,
@@ -48,7 +39,7 @@ export async function PATCH(
     const supabase = await createClient();
     const body = await request.json();
 
-    const validated = clientSchema.partial().parse(body);
+    const validated = clientUpdateSchema.parse(body);
 
     const result = await (supabase
       .from('clients')

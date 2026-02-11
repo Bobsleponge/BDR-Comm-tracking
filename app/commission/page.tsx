@@ -3,9 +3,11 @@
 import { useEffect, useState } from 'react';
 import { AuthGuard } from '@/components/shared/AuthGuard';
 import { Layout } from '@/components/shared/Layout';
+import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { CommissionSummary } from '@/components/commission/CommissionSummary';
 import { CommissionEntriesTable } from '@/components/commission/CommissionEntriesTable';
 import { CommissionBreakdown } from '@/components/commission/CommissionBreakdown';
+import { CommissionVerification } from '@/components/commission/CommissionVerification';
 import { createClient } from '@/lib/supabase/client';
 import { exportCommissionToCSV } from '@/lib/utils/csv-export';
 import useSWR from 'swr';
@@ -36,7 +38,8 @@ interface CommissionEntry {
 
 const fetcher = async (url: string) => {
   const res = await fetch(url, { credentials: 'include' });
-  const data = await res.json();
+  const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+  const data = await safeJsonParse(res);
   if (!res.ok || data.error) {
     throw new Error(data.error || `Failed to fetch: ${res.statusText}`);
   }
@@ -53,7 +56,7 @@ export default function CommissionPage() {
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
   
   const [reprocessing, setReprocessing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'table' | 'breakdown'>('breakdown');
+  const [activeTab, setActiveTab] = useState<'table' | 'breakdown' | 'verify'>('breakdown');
   const [filters, setFilters] = useState<{ serviceType?: string; billingType?: string }>({});
 
   // Generate list of months (current month and next 12 months)
@@ -110,7 +113,7 @@ export default function CommissionPage() {
     dedupingInterval: 60000,
   });
 
-  const { data: breakdownData, error: breakdownError } = useSWR(breakdownUrl, fetcher, {
+  const { data: breakdownData, error: breakdownError, mutate: mutateBreakdown } = useSWR(breakdownUrl, fetcher, {
     revalidateOnFocus: false,
     revalidateOnReconnect: false,
     dedupingInterval: 60000,
@@ -119,7 +122,16 @@ export default function CommissionPage() {
   // Progressive loading - show data as it arrives, don't wait for everything
   useEffect(() => {
     if (summaryData) setSummary(summaryData);
-    if (entriesData) setEntries(entriesData);
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/commission/page.tsx:124',message:'entriesData value check',data:{type:typeof entriesData,isArray:Array.isArray(entriesData),hasData:!!entriesData?.data,hasPagination:!!entriesData?.pagination},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    if (entriesData) {
+      // Extract entries array from paginated response
+      const entriesArray = Array.isArray(entriesData) 
+        ? entriesData 
+        : (entriesData?.data || []);
+      setEntries(entriesArray);
+    }
     if (breakdownData) setBreakdown(breakdownData);
     
     const hasError = summaryError || entriesError || breakdownError;
@@ -148,16 +160,23 @@ export default function CommissionPage() {
     }
   };
 
+  const [reprocessCloseMonth, setReprocessCloseMonth] = useState<string>('2025-12');
+
   const handleReprocessAllDeals = async () => {
     if (!isAdmin) return;
-    if (!confirm('This will reprocess all closed-won deals to create revenue events. This may take a while. Continue?')) {
+    const scope = reprocessCloseMonth && reprocessCloseMonth !== 'all' 
+      ? `deals closed in ${reprocessCloseMonth}` 
+      : 'all closed-won deals';
+    if (!confirm(`This will reprocess ${scope} to create revenue events and commission entries. Continue?`)) {
       return;
     }
 
     setReprocessing(true);
     try {
-      // Process in background - don't wait for all deals
-      const res = await fetch('/api/deals/reprocess-all', {
+      const url = reprocessCloseMonth && reprocessCloseMonth !== 'all'
+        ? `/api/deals/reprocess-all?close_month=${reprocessCloseMonth}` 
+        : '/api/deals/reprocess-all';
+      const res = await fetch(url, {
         method: 'POST',
       });
 
@@ -171,12 +190,9 @@ export default function CommissionPage() {
       
       // Refresh data after a short delay
       setTimeout(() => {
-        const url = selectedMonth 
-          ? `/api/commission/entries?payable_month=${selectedMonth}`
-          : '/api/commission/entries';
-        fetch(url).then(res => res.json()).then(data => {
-          setEntries(data);
-        });
+        mutateSummary();
+        mutateEntries();
+        mutateBreakdown();
       }, 2000);
     } catch (err: any) {
       alert(`Error: ${err.message}`);
@@ -185,27 +201,94 @@ export default function CommissionPage() {
     }
   };
 
+  const handleExportForFinance = async () => {
+    try {
+      // Build export URL with optional month filter
+      let exportUrl = '/api/commission/export';
+      if (selectedMonth && selectedMonth !== 'all') {
+        exportUrl += `?payable_month=${selectedMonth}`;
+      }
+
+      const res = await fetch(exportUrl, {
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to export commissions');
+      }
+
+      // Get the blob and trigger download
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      
+      // Extract filename from Content-Disposition header or use default
+      const contentDisposition = res.headers.get('Content-Disposition');
+      let filename = 'commissions-export.xlsx';
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`Error exporting: ${err.message}`);
+    }
+  };
+
+  // Get display text for export button based on selected month
+  const getExportButtonText = () => {
+    if (selectedMonth && selectedMonth !== 'all') {
+      return `Export ${formatMonthLabel(selectedMonth)} for Finance`;
+    }
+    return 'Export All Months for Finance';
+  };
+
   // Show loading only if we have absolutely no data
   const showFullLoading = loading && !summary && entries.length === 0 && !breakdown;
 
   return (
-    <AuthGuard>
-      <Layout>
+    <ErrorBoundary>
+      <AuthGuard>
+        <Layout>
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-6 flex justify-between items-center">
             <h2 className="text-2xl font-bold">Commission Tracking</h2>
             <div className="flex gap-2">
               {isAdmin && (
-                <Button
-                  onClick={handleReprocessAllDeals}
-                  disabled={reprocessing}
-                  variant="outline"
-                >
-                  {reprocessing ? 'Reprocessing...' : 'Reprocess All Deals'}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Select value={reprocessCloseMonth} onValueChange={setReprocessCloseMonth}>
+                    <SelectTrigger className="w-[180px]">
+                      <SelectValue placeholder="Deals closed in..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="2025-12">December 2025</SelectItem>
+                      <SelectItem value="2026-01">January 2026</SelectItem>
+                      <SelectItem value="all">All months</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    onClick={handleReprocessAllDeals}
+                    disabled={reprocessing}
+                    variant="outline"
+                  >
+                    {reprocessing ? 'Reprocessing...' : 'Reprocess Deals'}
+                  </Button>
+                </div>
               )}
               <Button variant="outline" onClick={() => exportCommissionToCSV(entries)}>
                 Export CSV
+              </Button>
+              <Button variant="default" onClick={handleExportForFinance} title={selectedMonth && selectedMonth !== 'all' ? `Exporting commissions for ${formatMonthLabel(selectedMonth)}` : 'Exporting all commissions'}>
+                {getExportButtonText()}
               </Button>
             </div>
           </div>
@@ -218,7 +301,7 @@ export default function CommissionPage() {
 
           <div className="mb-6">
             <Label htmlFor="month-select" className="mb-2">
-              Filter by Payable Month
+              Filter by Payable Month (Export will use this selection)
             </Label>
             <Select value={selectedMonth} onValueChange={setSelectedMonth}>
               <SelectTrigger id="month-select" className="w-[250px]">
@@ -262,10 +345,11 @@ export default function CommissionPage() {
                 </div>
               )}
 
-              <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'table' | 'breakdown')} className="mb-6">
+              <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'table' | 'breakdown' | 'verify')} className="mb-6">
                 <TabsList>
                   <TabsTrigger value="breakdown">Monthly Breakdown</TabsTrigger>
                   <TabsTrigger value="table">All Entries</TabsTrigger>
+                  <TabsTrigger value="verify">Verification</TabsTrigger>
                 </TabsList>
                 <TabsContent value="breakdown">
                   {breakdown ? (
@@ -279,6 +363,9 @@ export default function CommissionPage() {
                   ) : (
                     <Skeleton className="h-64 w-full" />
                   )}
+                </TabsContent>
+                <TabsContent value="verify">
+                  <CommissionVerification />
                 </TabsContent>
                 <TabsContent value="table">
                   {entries.length > 0 ? (
@@ -301,6 +388,7 @@ export default function CommissionPage() {
         </div>
       </Layout>
     </AuthGuard>
+    </ErrorBoundary>
   );
 }
 

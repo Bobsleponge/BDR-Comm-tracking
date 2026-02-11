@@ -18,8 +18,11 @@ export default function AdminPage() {
       try {
         const res = await fetch('/api/dashboard/top-reps?limit=5');
         if (res.ok) {
-          const data = await res.json();
-          setTopReps(data);
+          const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+          const data = await safeJsonParse(res);
+          if (!data.error) {
+            setTopReps(data);
+          }
         }
       } catch (err) {
         console.error('Failed to fetch top reps:', err);

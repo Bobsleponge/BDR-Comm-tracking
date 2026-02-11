@@ -1,10 +1,12 @@
+import 'server-only';
+
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { createLocalClient } from './local-wrapper'
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL
 
-export async function createClient() {
+export async function createClient(): Promise<any> {
   if (USE_LOCAL_DB) {
     return await createLocalClient()
   }
@@ -32,6 +34,6 @@ export async function createClient() {
         },
       },
     }
-  )
+  ) as any
 }
 

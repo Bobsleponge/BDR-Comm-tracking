@@ -32,19 +32,14 @@ export async function GET(request: NextRequest) {
         targetBdrId = userBdrId;
       }
 
-      // Get commission rules for payout delay
-      const rules = db.prepare('SELECT payout_delay_days, base_rate FROM commission_rules ORDER BY updated_at DESC LIMIT 1').get() as any;
-      const payoutDelayDays = rules?.payout_delay_days || 30;
-      const baseRate = rules?.base_rate || 0.025;
-
       // Build query to get commission entries with all related data
-      // Also include scheduled revenue events that will become payable (for recurring services)
+      // Only show actual commission entries - no forecasted/scheduled payments
       const params: any[] = [];
       
-      // Build first part: existing commission entries
-      let query1 = `
+      let query = `
         SELECT 
           ce.id,
+          ce.revenue_event_id as revenue_event_id,
           ce.amount,
           ce.status,
           ce.accrual_date,
@@ -52,6 +47,7 @@ export async function GET(request: NextRequest) {
           ce.month,
           d.id as deal_id,
           d.client_name,
+          d.close_date,
           d.service_type as deal_service_type,
           ds.id as service_id,
           ds.service_name,
@@ -70,30 +66,25 @@ export async function GET(request: NextRequest) {
       `;
 
       if (targetBdrId) {
-        query1 += ' AND ce.bdr_id = ?';
+        query += ' AND ce.bdr_id = ?';
         params.push(targetBdrId);
       }
 
       if (serviceType) {
-        query1 += ' AND d.service_type = ?';
+        query += ' AND d.service_type = ?';
         params.push(serviceType);
       }
 
       if (billingType) {
-        query1 += ' AND (ds.billing_type = ? OR re.billing_type = ?)';
+        query += ' AND (ds.billing_type = ? OR re.billing_type = ?)';
         params.push(billingType, billingType);
       }
 
-      // Since all revenue events are now processed immediately, we don't need the UNION query
-      // All events should have commission entries, so we only query commission_entries
-      // This significantly improves performance by removing the complex UNION
-      // Order by accrual_date first (when earned) so months are grouped correctly
-      // Limit to prevent huge result sets
-      const query = `${query1} ORDER BY accrual_date ASC, payable_date ASC LIMIT 5000`;
+      query += ` ORDER BY accrual_date ASC, payable_date ASC LIMIT 5000`;
 
       const entries = db.prepare(query).all(...params) as any[];
 
-      // Group by payable month
+      // Group by payable month (when BDR can claim commission)
       const breakdownByMonth = new Map<string, {
         month: string;
         totalAmount: number;
@@ -101,25 +92,29 @@ export async function GET(request: NextRequest) {
       }>();
 
       entries.forEach(entry => {
-        // Use accrual_date first (when commission is earned), fallback to month, then payable_date
-        const accrualMonth = entry.accrual_date
-          ? entry.accrual_date.substring(0, 7) // YYYY-MM format
-          : entry.month 
-            ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
-            : entry.payable_date?.substring(0, 7) || 'unknown';
+        // Use payable_date first (when BDR can claim commission), fallback to accrual_date, then month
+        const payableMonth = entry.payable_date
+          ? entry.payable_date.substring(0, 7) // YYYY-MM format
+          : entry.accrual_date
+            ? entry.accrual_date.substring(0, 7)
+            : entry.month 
+              ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
+              : 'unknown';
 
-        if (!breakdownByMonth.has(accrualMonth)) {
-          breakdownByMonth.set(accrualMonth, {
-            month: accrualMonth,
+        if (!breakdownByMonth.has(payableMonth)) {
+          breakdownByMonth.set(payableMonth, {
+            month: payableMonth,
             totalAmount: 0,
             entries: [],
           });
         }
 
-        const monthData = breakdownByMonth.get(accrualMonth)!;
+        const monthData = breakdownByMonth.get(payableMonth)!;
         monthData.totalAmount += Number(entry.amount);
+        // Generate unique ID: use commission entry ID if available, otherwise use revenue_event_id for scheduled entries
+        const uniqueId = entry.id || (entry.revenue_event_id ? `scheduled-${entry.revenue_event_id}` : `scheduled-${entry.deal_id}-${entry.collection_date}`);
         monthData.entries.push({
-          id: entry.id,
+          id: uniqueId,
           amount: Number(entry.amount),
           status: entry.status || (entry.source_type === 'scheduled_revenue' ? 'scheduled' : entry.status),
           accrualDate: entry.accrual_date,
@@ -128,6 +123,7 @@ export async function GET(request: NextRequest) {
             id: entry.deal_id,
             clientName: entry.client_name,
             serviceType: entry.deal_service_type,
+            closeDate: entry.close_date || null,
           },
           service: entry.service_id ? {
             id: entry.service_id,
@@ -138,6 +134,7 @@ export async function GET(request: NextRequest) {
             amountCollected: Number(entry.amount_collected),
             collectionDate: entry.collection_date,
             paymentStage: entry.payment_stage,
+            billingType: entry.revenue_billing_type || entry.billing_type,
           } : null,
         });
       });
@@ -150,7 +147,7 @@ export async function GET(request: NextRequest) {
         breakdown,
         total: entries.reduce((sum, e) => sum + Number(e.amount), 0),
         entryCount: entries.length,
-      }, 200, { cache: 30 }); // Cache for 30 seconds
+      }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
     }
 
     // Supabase mode
@@ -176,7 +173,7 @@ export async function GET(request: NextRequest) {
         accrual_date,
         payable_date,
         month,
-        deals!inner(id, client_name, service_type, cancellation_date),
+        deals!inner(id, client_name, service_type, close_date, cancellation_date),
         revenue_events(
           id,
           amount_collected,
@@ -218,8 +215,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Group by accrual month (when commission is earned) instead of payable month
-    // This ensures all months show commission when it was earned, not when it's paid
+    // Group by payable month (when BDR can claim commission)
+    // This ensures commission appears in the month the BDR can actually claim it
     const breakdownByMonth = new Map<string, {
       month: string;
       totalAmount: number;
@@ -227,22 +224,24 @@ export async function GET(request: NextRequest) {
     }>();
 
     filteredEntries.forEach((entry: any) => {
-      // Use accrual_date first (when commission is earned), fallback to month, then payable_date
-      const accrualMonth = entry.accrual_date
-        ? entry.accrual_date.substring(0, 7) // YYYY-MM format
-        : entry.month 
-          ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
-          : entry.payable_date?.substring(0, 7) || 'unknown';
+      // Use payable_date first (when BDR can claim commission), fallback to accrual_date, then month
+      const payableMonth = entry.payable_date
+        ? entry.payable_date.substring(0, 7) // YYYY-MM format
+        : entry.accrual_date
+          ? entry.accrual_date.substring(0, 7)
+          : entry.month 
+            ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
+            : 'unknown';
 
-      if (!breakdownByMonth.has(accrualMonth)) {
-        breakdownByMonth.set(accrualMonth, {
-          month: accrualMonth,
+      if (!breakdownByMonth.has(payableMonth)) {
+        breakdownByMonth.set(payableMonth, {
+          month: payableMonth,
           totalAmount: 0,
           entries: [],
         });
       }
 
-      const monthData = breakdownByMonth.get(accrualMonth)!;
+      const monthData = breakdownByMonth.get(payableMonth)!;
       monthData.totalAmount += Number(entry.amount);
       
       const revenueEvent = entry.revenue_events;
@@ -256,6 +255,7 @@ export async function GET(request: NextRequest) {
           id: entry.deals.id,
           clientName: entry.deals.client_name,
           serviceType: entry.deals.service_type,
+          closeDate: entry.deals.close_date || null,
         },
         service: revenueEvent?.deal_services ? {
           id: revenueEvent.deal_services.id,
@@ -266,6 +266,7 @@ export async function GET(request: NextRequest) {
           amountCollected: Number(revenueEvent.amount_collected),
           collectionDate: revenueEvent.collection_date,
           paymentStage: revenueEvent.payment_stage,
+          billingType: revenueEvent.billing_type,
         } : null,
       });
     });
@@ -278,7 +279,7 @@ export async function GET(request: NextRequest) {
       breakdown,
       total: filteredEntries.reduce((sum: number, e: any) => sum + Number(e.amount), 0),
       entryCount: filteredEntries.length,
-    }, 200, { cache: 30 }); // Cache for 30 seconds
+    }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
   } catch (error: any) {
     return apiError(error.message || 'Unauthorized', 401);
   }

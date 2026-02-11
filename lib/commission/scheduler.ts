@@ -1,3 +1,5 @@
+import 'server-only';
+
 import { createClient } from '@/lib/supabase/server';
 import { parseISO, format } from 'date-fns';
 import { createRevenueEventsForDeal, processRevenueEvent } from './revenue-events';
@@ -5,12 +7,33 @@ import { createRevenueEventsForDeal, processRevenueEvent } from './revenue-event
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
 /**
- * @deprecated Use createRevenueEventsForDeal instead. This function is kept for backward compatibility.
+ * @deprecated This function is deprecated but kept for backward compatibility with legacy scripts.
+ * 
+ * **Migration Guide:**
+ * Replace calls to this function with:
+ * ```typescript
+ * import { createRevenueEventsForDeal, processRevenueEvent } from '@/lib/commission/revenue-events';
+ * 
+ * // Create revenue events for the deal
+ * await createRevenueEventsForDeal(dealId);
+ * 
+ * // Process events that have been collected (collection_date <= today)
+ * const today = new Date().toISOString().split('T')[0];
+ * const events = await getRevenueEventsForDeal(dealId, today);
+ * for (const event of events) {
+ *   await processRevenueEvent(event.id);
+ * }
+ * ```
+ * 
+ * **Why deprecated:**
+ * This function is a wrapper that delegates to the new revenue events system.
+ * It's better to use the new functions directly for clarity and better error handling.
+ * 
  * Generate and save commission entries for a deal
  * This should be called when a deal is marked as closed-won
  */
 export async function scheduleCommissionPayouts(dealId: string): Promise<void> {
-  console.warn('scheduleCommissionPayouts is deprecated. Use createRevenueEventsForDeal instead.');
+  console.warn('scheduleCommissionPayouts is deprecated. Use createRevenueEventsForDeal and processRevenueEvent directly instead.');
   
   // Delegate to new revenue events system
   await createRevenueEventsForDeal(dealId);
@@ -37,21 +60,23 @@ export async function scheduleCommissionPayouts(dealId: string): Promise<void> {
       }
     }
   } else {
-    const supabase = await createClient();
+    const supabase = await createClient() as any;
     
-    const { data: revenueEvents } = await (supabase
+    const result = await supabase
       .from('revenue_events')
-      .select('id')
-      .eq('deal_id', dealId)
-      .lte('collection_date', today) as any);
+      .select('id, collection_date')
+      .eq('deal_id', dealId);
     
-    if (revenueEvents) {
-      for (const event of revenueEvents) {
-        try {
-          await processRevenueEvent(event.id);
-        } catch (error) {
-          console.error(`Error processing revenue event ${event.id}:`, error);
-        }
+    // Filter for events where collection_date <= today
+    const revenueEvents = (result.data || []).filter((event: any) => 
+      event.collection_date <= today
+    );
+    
+    for (const event of revenueEvents) {
+      try {
+        await processRevenueEvent(event.id);
+      } catch (error) {
+        console.error(`Error processing revenue event ${event.id}:`, error);
       }
     }
   }
@@ -99,16 +124,16 @@ export async function cancelFutureCommissionEntries(
   }
 
   // Supabase mode
-  const supabase = await createClient();
+  const supabase = await createClient() as any;
   const cancellationDateStr = format(cancellationDate, 'yyyy-MM-dd');
 
   // Cancel future revenue events
-  await (supabase
+  await supabase
     .from('revenue_events')
     .update({ commissionable: false })
     .eq('deal_id', dealId)
     .gte('collection_date', cancellationDateStr)
-    .eq('commissionable', true) as any);
+    .eq('commissionable', true);
 
   // Cancel future commission entries
   const monthStart = new Date(
@@ -117,12 +142,12 @@ export async function cancelFutureCommissionEntries(
     1
   );
 
-  await (supabase
+  await supabase
     .from('commission_entries')
     .update({ status: 'cancelled' })
     .eq('deal_id', dealId)
     .in('status', ['pending', 'accrued', 'payable'])
-    .gte('accrual_date', format(monthStart, 'yyyy-MM-dd')) as any);
+    .gte('accrual_date', format(monthStart, 'yyyy-MM-dd'));
 }
 
 /**
@@ -187,36 +212,38 @@ export async function handleRepLeave(bdrId: string, leaveDate: Date): Promise<vo
   }
 
   // Supabase mode
-  const supabase = await createClient();
+  const supabase = await createClient() as any;
 
   // Get BDR info
-  const { data: bdr, error: bdrError } = await (supabase
+  const bdrResult = await supabase
     .from('bdr_reps')
     .select('*')
     .eq('id', bdrId)
-    .single() as any);
+    .single();
 
-  if (bdrError || !bdr) {
-    throw new Error(`BDR not found: ${bdrError?.message}`);
+  if (bdrResult.error || !bdrResult.data) {
+    throw new Error(`BDR not found: ${bdrResult.error?.message}`);
   }
 
+  const bdr = bdrResult.data;
+
   // Update leave_date
-  await (supabase
+  await supabase
     .from('bdr_reps')
     .update({ leave_date: format(leaveDate, 'yyyy-MM-dd') })
-    .eq('id', bdrId) as any);
+    .eq('id', bdrId);
 
   // If trailing commission not allowed, cancel future events
   if (!bdr.allow_trailing_commission) {
     const leaveDateStr = format(leaveDate, 'yyyy-MM-dd');
 
     // Cancel future revenue events
-    await (supabase
+    await supabase
       .from('revenue_events')
       .update({ commissionable: false })
       .eq('bdr_id', bdrId)
       .gt('collection_date', leaveDateStr)
-      .eq('commissionable', true) as any);
+      .eq('commissionable', true);
 
     // Cancel future commission entries
     const monthStart = new Date(
@@ -225,17 +252,17 @@ export async function handleRepLeave(bdrId: string, leaveDate: Date): Promise<vo
       1
     );
 
-    await (supabase
+    await supabase
       .from('commission_entries')
       .update({ status: 'cancelled' })
       .eq('bdr_id', bdrId)
       .in('status', ['pending', 'accrued', 'payable'])
-      .gte('accrual_date', format(monthStart, 'yyyy-MM-dd')) as any);
+      .gte('accrual_date', format(monthStart, 'yyyy-MM-dd'));
   }
 
   // Mark all deals as do_not_pay_future
-  await (supabase
+  await supabase
     .from('deals')
     .update({ do_not_pay_future: true })
-    .eq('bdr_id', bdrId) as any);
+    .eq('bdr_id', bdrId);
 }

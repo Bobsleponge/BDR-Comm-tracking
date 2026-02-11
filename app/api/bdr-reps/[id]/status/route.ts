@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, requireAdmin } from '@/lib/utils/api-helpers';
 import { handleRepLeave } from '@/lib/commission/scheduler';
+import { bdrRepStatusSchema } from '@/lib/commission/validators';
 
 export async function PATCH(
   request: NextRequest,
@@ -14,14 +15,28 @@ export async function PATCH(
 
     const supabase = await createClient();
     const body = await request.json();
-    const { status, do_not_pay_future } = body;
+    
+    // Validate input
+    const validationResult = bdrRepStatusSchema.safeParse(body);
+    if (!validationResult.success) {
+      return apiError(
+        `Validation error: ${validationResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`,
+        400
+      );
+    }
+    
+    const { status, do_not_pay_future, leave_date, allow_trailing_commission } = validationResult.data;
 
     const updates: any = {};
     if (status) {
       updates.status = status;
     }
+    if (allow_trailing_commission !== undefined) {
+      updates.allow_trailing_commission = allow_trailing_commission;
+    }
     if (do_not_pay_future !== undefined) {
-      updates.do_not_pay_future = do_not_pay_future;
+      // Map to allow_trailing_commission: do_not_pay_future means no trailing commission
+      updates.allow_trailing_commission = !do_not_pay_future;
     }
 
     const result = await (supabase
@@ -39,7 +54,8 @@ export async function PATCH(
     // If do_not_pay_future is true, handle rep leave
     if (do_not_pay_future) {
       try {
-        await handleRepLeave(id);
+        const leaveDate = new Date(); // Use current date as leave date
+        await handleRepLeave(id, leaveDate);
       } catch (err) {
         console.error('Error handling rep leave:', err);
       }

@@ -1,7 +1,8 @@
+import 'server-only';
+
 import { getLocalDB } from '../db/local-db';
 import { getLocalUser, createLocalSession, deleteLocalSession, LocalUser } from '../db/local-auth';
 import { generateUUID } from '../utils/uuid';
-import { cookies } from 'next/headers';
 
 export async function createLocalClient() {
   const db = getLocalDB();
@@ -24,6 +25,8 @@ export async function createLocalClient() {
           };
         }
 
+        // Dynamic import to ensure this only runs on the server
+        const { cookies } = await import('next/headers');
         const cookieStore = await cookies();
         cookieStore.set('local_session', result.sessionId, {
           httpOnly: true,
@@ -41,6 +44,8 @@ export async function createLocalClient() {
         };
       },
       signOut: async () => {
+        // Dynamic import to ensure this only runs on the server
+        const { cookies } = await import('next/headers');
         const cookieStore = await cookies();
         const sessionId = cookieStore.get('local_session')?.value;
         if (sessionId) {

@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { isAdmin, getBdrIdFromUser } from './auth';
 
 /**
  * Create API error response
@@ -49,6 +48,7 @@ export async function requireAuth() {
  * Require admin role middleware
  */
 export async function requireAdmin() {
+  const { isAdmin } = await import('./auth');
   if (!(await isAdmin())) {
     throw new Error('Forbidden: Admin access required');
   }
@@ -59,10 +59,12 @@ export async function requireAdmin() {
  * Returns true if admin or if bdrId matches user's BDR ID
  */
 export async function canAccessBdr(bdrId: string): Promise<boolean> {
+  const { isAdmin, getBdrIdFromUser } = await import('./auth');
   if (await isAdmin()) return true;
   const userBdrId = await getBdrIdFromUser();
   return userBdrId === bdrId;
 }
+
 
 
 
