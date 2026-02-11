@@ -26,6 +26,8 @@ interface Deal {
   proposal_date: string;
   close_date: string | null;
   cancellation_date: string | null;
+  is_renewal?: boolean;
+  deal_services?: Array<{ is_renewal?: boolean | number }>;
   bdr_reps?: {
     name: string;
     email: string;
@@ -51,23 +53,15 @@ export default function DealsPage() {
   // Use SWR for data fetching with automatic caching
   const url = statusFilter === 'all' ? '/api/deals' : `/api/deals?status=${statusFilter}`;
   const { data: dealsRaw, error, isLoading: loading, mutate } = useSWR<any>(url, fetcher, {
-    revalidateOnFocus: true, // Refetch on window focus to get fresh data
+    revalidateOnFocus: true,
     revalidateOnReconnect: true,
-    dedupingInterval: 5000, // Reduce dedupe interval to 5 seconds
+    dedupingInterval: 0, // Always fetch fresh data when returning to list
   });
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:56',message:'dealsRaw value check',data:{type:typeof dealsRaw,isArray:Array.isArray(dealsRaw),hasData:!!dealsRaw?.data,hasPagination:!!dealsRaw?.pagination,keys:dealsRaw?Object.keys(dealsRaw):null},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   
   // Extract deals array from paginated response
   const deals: Deal[] = Array.isArray(dealsRaw) 
     ? dealsRaw 
     : (dealsRaw?.data || []);
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:64',message:'deals after extraction',data:{type:typeof deals,isArray:Array.isArray(deals),length:deals?.length},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
 
   // Fetch admin status once
   useSWR('/api/auth/user', fetcher, {
@@ -136,9 +130,6 @@ export default function DealsPage() {
 
   // Separate deals into active and cancelled
   // Apply status filter to active deals, but always show all cancelled deals
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/deals/page.tsx:126',message:'Before filter - deals check',data:{type:typeof deals,isArray:Array.isArray(deals),hasFilter:typeof deals?.filter === 'function'},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
   const allActiveDeals = deals.filter(deal => !deal.cancellation_date);
   const cancelledDeals = deals.filter(deal => deal.cancellation_date);
   
@@ -184,10 +175,15 @@ export default function DealsPage() {
                         ${deal.deal_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <Badge variant={getStatusVariant(deal.status)}>
                             {deal.status.replace('-', ' ')}
                           </Badge>
+                          {(deal.is_renewal || deal.deal_services?.some?.((s: any) => s.is_renewal === true || s.is_renewal === 1)) && (
+                            <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                              Renewal
+                            </Badge>
+                          )}
                           {isCancelled && (
                             <Badge variant="destructive">Cancelled</Badge>
                           )}

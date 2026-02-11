@@ -48,9 +48,17 @@ export const quarterlyPerformanceSchema = z.object({
 /**
  * Schema for validating deal data
  */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const dealSchema = z.object({
-  bdr_id: z.string().uuid().optional(),
-  client_id: z.string().uuid().nullable().optional(),
+  bdr_id: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      const s = String(val);
+      return uuidRegex.test(s) ? s : undefined;
+    },
+    z.string().uuid().optional()
+  ),
+  client_id: z.preprocess((val) => (val === '' ? null : val), z.string().uuid().nullable().optional()),
   client_name: z.string().min(1, 'Client name is required'),
   service_type: z.string().min(1).optional(), // Optional - service types are now at service level
   proposal_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format').optional(),
@@ -60,7 +68,7 @@ export const dealSchema = z.object({
   original_deal_value: z.number().min(0).nullable().optional(),
   status: z.enum(['proposed', 'closed-won', 'closed-lost']).optional(),
   is_renewal: z.boolean().optional(),
-  original_deal_id: z.string().uuid().nullable().optional(),
+  original_deal_id: z.preprocess((val) => (val === '' ? null : val), z.string().uuid().nullable().optional()),
   payout_months: z.number().int().positive().optional(),
 });
 
@@ -126,6 +134,8 @@ const dealServiceBaseSchema = z.object({
   contract_quarters: z.number().int().positive().default(4),
   commission_rate: z.number().min(0).max(1).nullable().optional(),
   completion_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format').nullable().optional(),
+  is_renewal: z.boolean().optional(),
+  original_service_value: z.number().min(0).nullable().optional(),
 });
 
 /**

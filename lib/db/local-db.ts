@@ -21,11 +21,34 @@ export function getLocalDB(): Database.Database {
     // Initialize schema if this is a new database
     if (isNewDb) {
       initializeSchema(dbInstance);
+    } else {
+      // Run migrations for existing databases
+      migrateSchema(dbInstance);
     }
     
     return dbInstance;
   } catch (error: any) {
     throw error;
+  }
+}
+
+function migrateSchema(db: Database.Database) {
+  // Add missing columns to deal_services for existing DBs
+  const tableInfo = db.prepare("PRAGMA table_info(deal_services)").all() as Array<{ name: string }>;
+  const colNames = tableInfo.map((c) => c.name);
+  try {
+    if (!colNames.includes('service_type')) {
+      db.exec(`ALTER TABLE deal_services ADD COLUMN service_type TEXT NOT NULL DEFAULT ''`);
+      db.exec(`UPDATE deal_services SET service_type = 'Service' WHERE service_type = '' OR service_type IS NULL`);
+    }
+    if (!colNames.includes('is_renewal')) {
+      db.exec(`ALTER TABLE deal_services ADD COLUMN is_renewal INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!colNames.includes('original_service_value')) {
+      db.exec(`ALTER TABLE deal_services ADD COLUMN original_service_value REAL`);
+    }
+  } catch {
+    // Ignore migration errors
   }
 }
 
@@ -131,6 +154,8 @@ function initializeSchema(db: Database.Database) {
       commissionable_value REAL NOT NULL,
       commission_amount REAL NOT NULL,
       completion_date TEXT,
+      is_renewal INTEGER NOT NULL DEFAULT 0,
+      original_service_value REAL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );

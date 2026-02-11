@@ -13,28 +13,12 @@ export interface LocalUser {
 }
 
 export async function getLocalUser(): Promise<LocalUser | null> {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:15',message:'getLocalUser called',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   try {
-    // Dynamic import to ensure this only runs on the server
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:19',message:'Before cookies import',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     const { cookies } = await import('next/headers');
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:22',message:'Cookies imported, calling cookies()',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     const cookieStore = await cookies();
     const cookieValue = cookieStore.get('local_session')?.value;
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:25',message:'Cookie retrieved',data:{hasCookie:!!cookieValue},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
   
   if (!cookieValue) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:28',message:'No cookie found',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     return null;
   }
 
@@ -55,24 +39,14 @@ export async function getLocalUser(): Promise<LocalUser | null> {
         setSession(sessionId, sessionData);
         session = sessionData;
       } else {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:50',message:'Session expired',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         return null; // Session expired
       }
     } catch (e) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:57',message:'Session decode failed',data:{error:String(e)},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      // Decoding failed
-      return null;
+      return null; // Decoding failed
     }
   }
   
   if (!session) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:65',message:'No session found',data:{},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     return null;
   }
 
@@ -87,14 +61,8 @@ export async function getLocalUser(): Promise<LocalUser | null> {
       role: session.role,
     },
   };
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:77',message:'getLocalUser returning user',data:{userId:user.id,email:user.email,role:user.user_metadata.role},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   return user;
   } catch (error: any) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/db/local-auth.ts:82',message:'getLocalUser error',data:{error:error?.message,stack:error?.stack?.substring(0,200)},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     throw error;
   }
 }

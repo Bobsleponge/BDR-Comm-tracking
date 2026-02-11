@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, canAccessBdr } from '@/lib/utils/api-helpers';
 import { dealServiceSchema } from '@/lib/commission/validators';
-import { calculateServiceCommission } from '@/lib/commission/calculator';
+import { calculateServiceCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -100,35 +100,66 @@ export async function POST(
       const serviceId = generateUUID();
       const now = new Date().toISOString();
 
+      const isRenewal = serviceData.is_renewal ? 1 : 0;
+      const originalServiceValue = serviceData.original_service_value ?? null;
+      let commissionableValue = commission.commissionable_value;
+      let commissionAmount = commission.commission_amount;
+      if (isRenewal && originalServiceValue != null) {
+        const rate = serviceData.commission_rate ?? baseRate;
+        commissionAmount = Number(calculateRenewalCommission(
+          commission.commissionable_value,
+          originalServiceValue,
+          rate
+        ).toFixed(2));
+      }
+
+      const toBind = (v: any): string | number | null => (v === undefined ? null : (typeof v === 'boolean' ? (v ? 1 : 0) : v));
       db.prepare(`
         INSERT INTO deal_services (
           id, deal_id, service_name, service_type, billing_type, unit_price, monthly_price,
           quarterly_price, quantity, contract_months, contract_quarters,
           commission_rate, commissionable_value, commission_amount, completion_date,
+          is_renewal, original_service_value,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         serviceId,
         dealId,
         serviceData.service_name,
         serviceData.service_type,
         serviceData.billing_type,
-        serviceData.unit_price,
-        serviceData.monthly_price || null,
-        serviceData.quarterly_price || null,
-        serviceData.quantity,
-        serviceData.contract_months,
-        serviceData.contract_quarters,
-        serviceData.commission_rate || null,
-        commission.commissionable_value,
-        commission.commission_amount,
-        serviceData.completion_date || null,
+        serviceData.unit_price ?? 0,
+        toBind(serviceData.monthly_price),
+        toBind(serviceData.quarterly_price),
+        serviceData.quantity ?? 1,
+        serviceData.contract_months ?? 12,
+        serviceData.contract_quarters ?? 4,
+        toBind(serviceData.commission_rate),
+        commissionableValue,
+        commissionAmount,
+        toBind(serviceData.completion_date),
+        isRenewal,
+        toBind(originalServiceValue),
         now,
         now
       );
 
       // Update deal value
       await updateDealValue(dealId);
+
+      // Reprocess deal so revenue events and commission entries include the new service
+      const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+      db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
+      db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
+      await createRevenueEventsForDeal(dealId);
+      const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(dealId) as Array<{ id: string }>;
+      for (const ev of revenueEvents) {
+        try {
+          await processRevenueEvent(ev.id);
+        } catch {
+          // Ignore individual processing errors
+        }
+      }
 
       const newService = db.prepare('SELECT * FROM deal_services WHERE id = ?').get(serviceId) as any;
       return apiSuccess(newService, 201);
@@ -151,7 +182,7 @@ export async function POST(
       return apiError('Forbidden', 403);
     }
 
-    // Calculate commission
+    // Calculate commission - for renewals use uplift
     const baseRate = await getBaseCommissionRate();
     const commission = calculateServiceCommission(
       serviceData.billing_type,
@@ -165,24 +196,43 @@ export async function POST(
       baseRate
     );
 
+    let commissionableValue = commission.commissionable_value;
+    let commissionAmount = commission.commission_amount;
+    const isRenewal = !!serviceData.is_renewal;
+    const originalServiceValue = serviceData.original_service_value ?? null;
+    if (isRenewal && originalServiceValue != null) {
+      const rate = serviceData.commission_rate ?? baseRate;
+      commissionAmount = Number(calculateRenewalCommission(
+        commission.commissionable_value,
+        originalServiceValue,
+        rate
+      ).toFixed(2));
+    }
+
+    const insertPayload: Record<string, any> = {
+      deal_id: dealId,
+      service_name: serviceData.service_name,
+      service_type: serviceData.service_type,
+      billing_type: serviceData.billing_type,
+      unit_price: serviceData.unit_price,
+      monthly_price: serviceData.monthly_price || null,
+      quarterly_price: serviceData.quarterly_price || null,
+      quantity: serviceData.quantity,
+      contract_months: serviceData.contract_months,
+      contract_quarters: serviceData.contract_quarters,
+      commission_rate: serviceData.commission_rate || null,
+      commissionable_value: commissionableValue,
+      commission_amount: commissionAmount,
+      completion_date: serviceData.completion_date || null,
+    };
+    if (isRenewal) {
+      insertPayload.is_renewal = isRenewal;
+      insertPayload.original_service_value = originalServiceValue;
+    }
+
     const { data: newService, error } = await (supabase as any)
       .from('deal_services')
-      .insert({
-        deal_id: dealId,
-        service_name: serviceData.service_name,
-        service_type: serviceData.service_type,
-        billing_type: serviceData.billing_type,
-        unit_price: serviceData.unit_price,
-        monthly_price: serviceData.monthly_price || null,
-        quarterly_price: serviceData.quarterly_price || null,
-        quantity: serviceData.quantity,
-        contract_months: serviceData.contract_months,
-        contract_quarters: serviceData.contract_quarters,
-        commission_rate: serviceData.commission_rate || null,
-        commissionable_value: commission.commissionable_value,
-        commission_amount: commission.commission_amount,
-        completion_date: serviceData.completion_date || null,
-      })
+      .insert(insertPayload)
       .select()
       .single();
 
@@ -192,6 +242,21 @@ export async function POST(
 
     // Update deal value
     await updateDealValue(dealId);
+
+    // Reprocess deal so revenue events and commission entries include the new service
+    const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+    await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
+    await (supabase as any).from('revenue_events').delete().eq('deal_id', dealId);
+    await createRevenueEventsForDeal(dealId);
+    const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', dealId);
+    const revenueEvents = eventsResult.data || [];
+    for (const ev of revenueEvents) {
+      try {
+        await processRevenueEvent(ev.id);
+      } catch {
+        // Ignore individual processing errors
+      }
+    }
 
     return apiSuccess(newService, 201);
   } catch (error: any) {

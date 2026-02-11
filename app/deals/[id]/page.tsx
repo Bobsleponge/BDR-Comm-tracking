@@ -144,6 +144,10 @@ export default function DealDetailPage() {
     return 'secondary';
   };
 
+  const hasRenewalService =
+    deal.is_renewal ||
+    (deal.deal_services?.some?.((s: any) => s.is_renewal === true || s.is_renewal === 1) ?? false);
+
   return (
     <AuthGuard>
       <Layout>
@@ -171,7 +175,14 @@ export default function DealDetailPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>{deal.client_name}</CardTitle>
+              <div className="flex items-center gap-2 flex-wrap">
+                <CardTitle>{deal.client_name}</CardTitle>
+                {hasRenewalService && (
+                  <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                    Renewal
+                  </Badge>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
               <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -179,6 +190,12 @@ export default function DealDetailPage() {
                   <dt className="text-sm font-medium text-muted-foreground">Service Type</dt>
                   <dd className="mt-1 text-sm">{deal.service_type}</dd>
                 </div>
+                {hasRenewalService && (
+                  <div>
+                    <dt className="text-sm font-medium text-muted-foreground">Renewal Deal</dt>
+                    <dd className="mt-1 text-sm text-amber-700">Yes — commission calculated on uplift only</dd>
+                  </div>
+                )}
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Deal Value</dt>
                   <dd className="mt-1 text-sm font-medium">

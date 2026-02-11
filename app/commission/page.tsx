@@ -122,9 +122,6 @@ export default function CommissionPage() {
   // Progressive loading - show data as it arrives, don't wait for everything
   useEffect(() => {
     if (summaryData) setSummary(summaryData);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/commission/page.tsx:124',message:'entriesData value check',data:{type:typeof entriesData,isArray:Array.isArray(entriesData),hasData:!!entriesData?.data,hasPagination:!!entriesData?.pagination},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     if (entriesData) {
       // Extract entries array from paginated response
       const entriesArray = Array.isArray(entriesData) 

@@ -149,10 +149,13 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     const isFirstPayment = firstInvoiceDateStr && accrualDate === firstInvoiceDateStr;
 
     let payableDate: string;
-    if (isDepositSecondHalf || isFirstPayment) {
+    const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
+    // Renewals: full commission payable 7 days after close (existing business, not broken up)
+    if (revBilling === 'renewal') {
+      payableDate = accrualDate;
+    } else if (isDepositSecondHalf || isFirstPayment) {
       payableDate = accrualDate;
     } else {
-      const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
       if ((revBilling === 'monthly' || revBilling === 'mrr') && firstInvoiceDateStr) {
         // MRR: 30-day cadence from first claim (Jan 7, Feb 6, Mar 8, Apr 7...)
         const sameDealService = db.prepare(`
@@ -293,17 +296,19 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     accrualDate = event.collection_date;
   }
 
-  // payable_date: deposit second 50% and first payment: no delay. MRR: 30-day cadence from first claim. Quarterly: 90-day cadence.
+  // payable_date: renewal = 7 days after close (full commission, no spread). Deposit/second 50%/first payment: no delay. MRR: 30-day cadence. Quarterly: 90-day cadence.
   const firstInvoiceDateStr = deal.first_invoice_date
     ? (typeof deal.first_invoice_date === 'string' ? deal.first_invoice_date.split('T')[0] : format(new Date(deal.first_invoice_date), 'yyyy-MM-dd'))
     : null;
   const isFirstPayment = firstInvoiceDateStr && accrualDate === firstInvoiceDateStr;
 
   let payableDate: string;
-  if (isDepositSecondHalf || isFirstPayment) {
+  const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
+  if (revBilling === 'renewal') {
+    payableDate = accrualDate;
+  } else if (isDepositSecondHalf || isFirstPayment) {
     payableDate = accrualDate;
   } else {
-    const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
     if ((revBilling === 'monthly' || revBilling === 'mrr') && firstInvoiceDateStr) {
       const { data: sameDealService } = await supabase.from('revenue_events')
         .select('id, collection_date')
@@ -413,39 +418,60 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    const isRenewalDeal = deal.is_renewal === 1 || deal.is_renewal === true;
+    const dealOriginalValue = Number(deal.original_deal_value ?? 0);
+    const totalDealCommissionableValue = services.reduce((sum: number, s: any) => sum + Number(s.commissionable_value || 0), 0);
+
     // Create revenue events for each service based on billing type
     for (const service of services) {
-      // Check if this service is marked as a renewal (service-level flag)
-      const isRenewalService = service.is_renewal === 1 || service.is_renewal === true;
-      
+      const serviceMarkedRenewal = service.is_renewal === 1 || service.is_renewal === true;
       let serviceAmount = Number(service.commissionable_value || 0);
       let serviceBillingType: 'one_off' | 'monthly' | 'quarterly' | 'renewal' = service.billing_type === 'mrr' ? 'monthly' : 
                                                                                 service.billing_type === 'quarterly' ? 'quarterly' : 'one_off';
       
-      // For renewal services, calculate uplift amount using the manually entered previous amount
+      // Determine original value for uplift: service-level, or deal-level fallback
+      let originalServiceValue: number;
+      if (serviceMarkedRenewal && (service.original_service_value != null && service.original_service_value > 0)) {
+        originalServiceValue = Number(service.original_service_value);
+      } else if (isRenewalDeal && dealOriginalValue > 0) {
+        if (services.length === 1) {
+          originalServiceValue = dealOriginalValue;
+        } else {
+          const currentValue = Number(service.commissionable_value || 0);
+          const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
+          originalServiceValue = dealOriginalValue * proportion;
+        }
+      } else if (serviceMarkedRenewal) {
+        continue; // Service marked renewal but no original value - skip to avoid commission on full amount
+      } else {
+        originalServiceValue = 0;
+      }
+
+      const isRenewalService = serviceMarkedRenewal || (isRenewalDeal && dealOriginalValue > 0);
       if (isRenewalService) {
-        const originalServiceValue = Number(service.original_service_value || 0);
         const renewalServiceValue = Number(service.commissionable_value || 0);
         const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
         
         if (serviceUplift > 0) {
-          // Use uplift amount for renewal service
           serviceAmount = serviceUplift;
           serviceBillingType = 'renewal';
         } else {
-          // No uplift, skip this service (no commission)
           continue;
         }
       }
       
-      // For renewal services, always create a single one-off revenue event for the uplift (regardless of billing type)
       if (isRenewalService && serviceBillingType === 'renewal') {
+        // Renewals: full commission payable 7 days after close (existing business, not spread like MRR/quarterly)
+        const closeDate = deal.close_date
+          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
+          : firstInvoiceDate;
+        const renewalPayableDate = addDays(closeDate, 7);
         await createRevenueEvent(
           dealId,
           service.id,
           deal.bdr_id,
           serviceAmount,
-          firstInvoiceDate, // First payment received on first_invoice_date
+          renewalPayableDate,
           'renewal',
           'renewal',
           true
@@ -588,38 +614,58 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    const isRenewalDeal = deal.is_renewal === true || deal.is_renewal === 1;
+    const dealOriginalValue = Number(deal.original_deal_value ?? 0);
+    const totalDealCommissionableValue = (servicesResult.data || []).reduce((sum: number, s: any) => sum + Number(s.commissionable_value || 0), 0);
+
     for (const service of servicesResult.data) {
-      // Check if this service is marked as a renewal (service-level flag)
-      const isRenewalService = service.is_renewal === true || service.is_renewal === 1;
-      
+      const serviceMarkedRenewal = service.is_renewal === true || service.is_renewal === 1;
       let serviceAmount = Number(service.commissionable_value || 0);
       let serviceBillingType: 'one_off' | 'monthly' | 'quarterly' | 'renewal' = service.billing_type === 'mrr' ? 'monthly' : 
                                                                                 service.billing_type === 'quarterly' ? 'quarterly' : 'one_off';
       
-      // For renewal services, calculate uplift amount using the manually entered previous amount
+      let originalServiceValue: number;
+      if (serviceMarkedRenewal && (service.original_service_value != null && service.original_service_value > 0)) {
+        originalServiceValue = Number(service.original_service_value);
+      } else if (isRenewalDeal && dealOriginalValue > 0) {
+        if (servicesResult.data!.length === 1) {
+          originalServiceValue = dealOriginalValue;
+        } else {
+          const currentValue = Number(service.commissionable_value || 0);
+          const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
+          originalServiceValue = dealOriginalValue * proportion;
+        }
+      } else if (serviceMarkedRenewal) {
+        continue;
+      } else {
+        originalServiceValue = 0;
+      }
+
+      const isRenewalService = serviceMarkedRenewal || (isRenewalDeal && dealOriginalValue > 0);
       if (isRenewalService) {
-        const originalServiceValue = Number(service.original_service_value || 0);
         const renewalServiceValue = Number(service.commissionable_value || 0);
         const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
         
         if (serviceUplift > 0) {
-          // Use uplift amount for renewal service
           serviceAmount = serviceUplift;
           serviceBillingType = 'renewal';
         } else {
-          // No uplift, skip this service (no commission)
           continue;
         }
       }
       
-      // For renewal services, always create a single one-off revenue event for the uplift (regardless of billing type)
       if (isRenewalService && serviceBillingType === 'renewal') {
+        // Renewals: full commission payable 7 days after close (existing business, not spread like MRR/quarterly)
+        const closeDate = deal.close_date
+          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
+          : firstInvoiceDate;
+        const renewalPayableDate = addDays(closeDate, 7);
         await createRevenueEvent(
           dealId,
           service.id,
           deal.bdr_id,
           serviceAmount,
-          firstInvoiceDate, // First payment received on first_invoice_date
+          renewalPayableDate,
           'renewal',
           'renewal',
           true

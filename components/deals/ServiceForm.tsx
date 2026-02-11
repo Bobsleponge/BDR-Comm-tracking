@@ -21,13 +21,20 @@ interface ServiceFormProps {
     contract_quarters: number;
     commission_rate: number | null;
     completion_date: string | null;
+    is_renewal?: boolean | number;
+    original_service_value?: number | null;
+    commissionable_value?: number;
   };
   baseCommissionRate: number;
-  onSubmit: (service: any) => void;
+  onSubmit: (service: any) => void | Promise<void>;
   onCancel: () => void;
+  isSubmitting?: boolean;
+  /** When adding to a renewal deal, pre-fill is_renewal and original_service_value */
+  dealIsRenewal?: boolean;
+  dealOriginalValue?: number | null;
 }
 
-export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }: ServiceFormProps) {
+export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, isSubmitting = false, dealIsRenewal, dealOriginalValue }: ServiceFormProps) {
   const [formData, setFormData] = useState({
     service_name: service?.service_name || '',
     service_type: service?.service_type || '',
@@ -40,6 +47,8 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
     contract_quarters: service?.contract_quarters || 4,
     commission_rate: service?.commission_rate || null as number | null,
     completion_date: service?.completion_date || '',
+    is_renewal: !!(service?.is_renewal === true || service?.is_renewal === 1) || !!dealIsRenewal,
+    original_service_value: (service?.original_service_value ?? dealOriginalValue ?? null) as number | null,
   });
 
   const [calculation, setCalculation] = useState<{ commissionable_value: number; commission_amount: number } | null>(null);
@@ -69,8 +78,9 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
     }
   }, [formData, baseCommissionRate]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const newErrors: Record<string, string> = {};
 
     if (!formData.service_name.trim()) {
@@ -105,13 +115,17 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
       newErrors.contract_quarters = 'Contract quarters must be at least 1';
     }
 
+    if (formData.is_renewal && (formData.original_service_value == null || formData.original_service_value < 0)) {
+      newErrors.original_service_value = 'Previous deal amount is required for renewal services';
+    }
+
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
       return;
     }
 
     setErrors({});
-    onSubmit({
+    const result = onSubmit({
       ...formData,
       id: service?.id,
       monthly_price: formData.billing_type === 'mrr' ? formData.monthly_price : null,
@@ -119,7 +133,10 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
       unit_price: formData.billing_type === 'mrr' || formData.billing_type === 'quarterly' ? 0 : formData.unit_price,
       completion_date: formData.completion_date || null,
       commission_rate: formData.commission_rate || null,
+      is_renewal: formData.is_renewal,
+      original_service_value: formData.is_renewal ? (formData.original_service_value ?? 0) : null,
     });
+    await Promise.resolve(result);
   };
 
   const formatCurrency = (value: number) => {
@@ -133,6 +150,11 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4 p-4 border rounded-lg bg-gray-50">
+      {Object.keys(errors).length > 0 && (
+        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded text-sm">
+          Please fix the errors below before saving.
+        </div>
+      )}
       <div>
         <Label htmlFor="service_name">Service Name *</Label>
         <Input
@@ -296,6 +318,45 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
         </p>
       </div>
 
+      <div className="flex items-center space-x-2">
+        <input
+          type="checkbox"
+          id="is_renewal"
+          checked={formData.is_renewal}
+          onChange={(e) => setFormData({
+            ...formData,
+            is_renewal: e.target.checked,
+            original_service_value: e.target.checked ? formData.original_service_value : null,
+          })}
+          className="rounded"
+        />
+        <Label htmlFor="is_renewal">Is Renewal</Label>
+      </div>
+
+      {formData.is_renewal && (
+        <div>
+          <Label htmlFor="original_service_value">Previous Deal Amount *</Label>
+          <Input
+            id="original_service_value"
+            type="number"
+            step="0.01"
+            min="0"
+            value={formData.original_service_value ?? ''}
+            onChange={(e) => setFormData({
+              ...formData,
+              original_service_value: e.target.value ? parseFloat(e.target.value) : null,
+            })}
+            placeholder="Amount from previous deal"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Commission will be calculated on the uplift (current value minus this amount)
+          </p>
+          {errors.original_service_value && (
+            <p className="text-sm text-red-600 mt-1">{errors.original_service_value}</p>
+          )}
+        </div>
+      )}
+
       {calculation && (
         <div className="p-3 bg-blue-50 border border-blue-200 rounded">
           <h4 className="font-medium text-sm mb-2">Commission Calculation</h4>
@@ -304,10 +365,32 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
               <span className="text-gray-600">Commissionable Value:</span>
               <span className="font-medium">{formatCurrency(calculation.commissionable_value)}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-gray-600">Commission Amount:</span>
-              <span className="font-medium">{formatCurrency(calculation.commission_amount)}</span>
-            </div>
+            {formData.is_renewal && formData.original_service_value != null && (
+              <>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Previous Deal Amount:</span>
+                  <span className="font-medium">{formatCurrency(formData.original_service_value)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Uplift (commissionable):</span>
+                  <span className="font-medium">
+                    {formatCurrency(Math.max(0, calculation.commissionable_value - formData.original_service_value))}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Commission (on uplift):</span>
+                  <span className="font-medium">
+                    {formatCurrency(Math.max(0, calculation.commissionable_value - formData.original_service_value) * (formData.commission_rate ?? baseCommissionRate))}
+                  </span>
+                </div>
+              </>
+            )}
+            {(!formData.is_renewal || formData.original_service_value == null) && (
+              <div className="flex justify-between">
+                <span className="text-gray-600">Commission Amount:</span>
+                <span className="font-medium">{formatCurrency(calculation.commission_amount)}</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-gray-600">Rate Used:</span>
               <span className="font-medium">
@@ -319,8 +402,10 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel }:
       )}
 
       <div className="flex gap-2">
-        <Button type="submit">{service ? 'Update Service' : 'Add Service'}</Button>
-        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Saving...' : service ? 'Update Service' : 'Add Service'}
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>Cancel</Button>
       </div>
     </form>
   );

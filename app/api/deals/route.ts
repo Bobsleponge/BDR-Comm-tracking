@@ -84,7 +84,7 @@ export async function GET(request: NextRequest) {
           total,
           totalPages: Math.ceil(total / limit),
         },
-      });
+      }, 200, { cache: 'no-store' });
     }
 
     const supabase = await createClient();
@@ -130,7 +130,7 @@ export async function GET(request: NextRequest) {
         total: total || (data?.length || 0),
         totalPages: Math.ceil((total || (data?.length || 0)) / limit),
       },
-    });
+    }, 200, { cache: 'no-store' });
   } catch (error: any) {
     return apiError(error.message, 401);
   }
@@ -196,7 +196,7 @@ export async function POST(request: NextRequest) {
         close_date: body.close_date || null,
         first_invoice_date: firstInvoiceDate,
         deal_value: body.deal_value || 0,
-        original_deal_value: body.original_deal_value || body.deal_value || 0,
+        original_deal_value: body.is_renewal ? (body.original_deal_value ?? null) : (body.original_deal_value ?? body.deal_value ?? 0),
         status: body.status || 'proposed',
         is_renewal: body.is_renewal ? 1 : 0,
         original_deal_id: body.original_deal_id || null,
@@ -215,10 +215,10 @@ export async function POST(request: NextRequest) {
           created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        deal.id, deal.bdr_id, deal.client_id, deal.client_name, deal.service_type,
-        deal.proposal_date, deal.close_date, deal.first_invoice_date,
-        deal.deal_value, deal.original_deal_value, deal.status, deal.is_renewal,
-        deal.original_deal_id, deal.payout_months, deal.created_at, deal.updated_at
+        deal.id, deal.bdr_id, deal.client_id ?? null, deal.client_name, deal.service_type,
+        deal.proposal_date, deal.close_date ?? null, deal.first_invoice_date ?? null,
+        deal.deal_value, deal.original_deal_value ?? null, deal.status, deal.is_renewal,
+        deal.original_deal_id ?? null, deal.payout_months, deal.created_at, deal.updated_at
       );
 
       return apiSuccess(deal, 201);

@@ -66,10 +66,17 @@ export function CommissionBreakdown({
               : null;
 
             return (
-              <div key={service.id} className="border-l-4 border-indigo-500 pl-4">
+              <div key={service.id} className={`border-l-4 pl-4 ${(service as any).is_renewal ? 'border-amber-400' : 'border-indigo-500'}`}>
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
-                    <h4 className="text-base font-medium text-gray-900">{service.service_name}</h4>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="text-base font-medium text-gray-900">{service.service_name}</h4>
+                      {(service as any).is_renewal === true || (service as any).is_renewal === 1 ? (
+                        <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200/60">
+                          Renewal
+                        </span>
+                      ) : null}
+                    </div>
                     <p className="mt-1 text-sm text-gray-500">{getBillingTypeLabel(service.billing_type)}</p>
                   </div>
                   <div className="text-right">
@@ -136,12 +143,39 @@ export function CommissionBreakdown({
                   )}
 
                   <div className="pt-2 border-t border-gray-200">
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">Commissionable Value:</span>
-                      <span className="text-gray-900 font-medium">
-                        {formatCurrency(service.commissionable_value)}
-                      </span>
-                    </div>
+                    {(service as any).is_renewal === true || (service as any).is_renewal === 1 ? (
+                      <>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Contract Value:</span>
+                          <span className="text-gray-900 font-medium">
+                            {formatCurrency(service.commissionable_value)}
+                          </span>
+                        </div>
+                        {(service as any).original_service_value != null && (
+                          <>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Previous Deal Amount:</span>
+                              <span className="text-gray-900">
+                                {formatCurrency((service as any).original_service_value)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Uplift (commissionable):</span>
+                              <span className="text-gray-900 font-medium">
+                                {formatCurrency(Math.max(0, service.commissionable_value - ((service as any).original_service_value || 0)))}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Commissionable Value:</span>
+                        <span className="text-gray-900 font-medium">
+                          {formatCurrency(service.commissionable_value)}
+                        </span>
+                      </div>
+                    )}
                     <div className="flex justify-between mt-1">
                       <span className="text-gray-500">Commission Rate:</span>
                       <span className="text-gray-900">

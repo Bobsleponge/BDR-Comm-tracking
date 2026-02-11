@@ -25,8 +25,9 @@ export async function GET(request: NextRequest) {
       const { getLocalDB } = await import('@/lib/db/local-db');
       const db = getLocalDB();
 
-      // Build query to get all commission entries with full deal details
-      // For renewals, join with original deal to get original proposal value
+      // Build query to get all commission entries with full deal and service details
+      // For renewals: use deal.is_renewal OR deal_services.is_renewal (per-service tracking)
+      // amount_collected = bill amount for this specific commission payment (e.g. $1000 for monthly bookkeeping)
       let query = `
         SELECT 
           ce.id,
@@ -45,17 +46,22 @@ export async function GET(request: NextRequest) {
           d.first_invoice_date,
           d.deal_value,
           d.original_deal_value,
-          d.is_renewal,
+          d.is_renewal as deal_is_renewal,
           d.original_deal_id,
           d.payout_months,
           re.amount_collected,
           re.collection_date,
           re.payment_stage,
+          re.billing_type as re_billing_type,
+          ds.id as service_id,
           ds.service_name,
+          ds.service_type as ds_service_type,
           ds.billing_type,
           ds.commission_rate,
           ds.commissionable_value,
           ds.commission_amount as service_commission_amount,
+          ds.is_renewal as service_is_renewal,
+          ds.original_service_value,
           od.deal_value as original_proposal_value
         FROM commission_entries ce
         INNER JOIN deals d ON ce.deal_id = d.id
@@ -77,13 +83,16 @@ export async function GET(request: NextRequest) {
 
       const rawEntries = db.prepare(query).all(...params) as any[];
       
-      // Map local DB results to include all fields
-      // For renewals, use original_proposal_value from joined original deal, or original_deal_value, or current deal_value
+      // Map local DB results - use service-level is_renewal when we have a service, else deal-level
       entries = rawEntries.map(entry => {
-        const isRenewal = entry.is_renewal ? true : false;
+        const serviceIsRenewal = entry.service_id && (entry.service_is_renewal === 1 || entry.service_is_renewal === true);
+        const dealIsRenewal = entry.deal_is_renewal === 1 || entry.deal_is_renewal === true;
+        const isRenewal = serviceIsRenewal || dealIsRenewal;
         const originalProposalValue = isRenewal 
           ? (entry.original_proposal_value || entry.original_deal_value || entry.deal_value || 0)
           : (entry.deal_value || 0);
+        const serviceName = entry.service_name || entry.service_type || 'Service';
+        const billingType = entry.billing_type || entry.re_billing_type || '';
         
         return {
           id: entry.id,
@@ -104,11 +113,11 @@ export async function GET(request: NextRequest) {
           original_proposal_value: originalProposalValue,
           is_renewal: isRenewal,
           payout_months: entry.payout_months || 12,
-          amount_collected: entry.amount_collected || 0,
+          amount_collected: entry.amount_collected ?? 0,
           collection_date: entry.collection_date || '',
           payment_stage: entry.payment_stage || '',
-          service_name: entry.service_name || '',
-          billing_type: entry.billing_type || '',
+          service_name: serviceName,
+          billing_type: billingType,
         };
       });
     } else {
@@ -143,9 +152,11 @@ export async function GET(request: NextRequest) {
             amount_collected,
             collection_date,
             payment_stage,
+            billing_type,
             deal_services(
               service_name,
-              billing_type
+              billing_type,
+              is_renewal
             )
           )
         `)
@@ -161,26 +172,21 @@ export async function GET(request: NextRequest) {
         return apiError(error.message || 'Failed to fetch commission entries', 500);
       }
 
-      // Transform Supabase response to flat structure
+      // Transform Supabase response - use service-level is_renewal when available, else deal-level
       let allEntries = (data || []).map((entry: any) => {
         const revenueEvent = entry.revenue_events;
         const dealService = revenueEvent?.deal_services;
         
-        // Handle array or single object for deal_services
-        const serviceName = Array.isArray(dealService) 
-          ? dealService[0]?.service_name 
-          : dealService?.service_name;
-        const billingType = Array.isArray(dealService)
-          ? dealService[0]?.billing_type
-          : dealService?.billing_type || revenueEvent?.billing_type;
+        const serviceObj = Array.isArray(dealService) ? dealService[0] : dealService;
+        const serviceName = serviceObj?.service_name || entry.deals?.service_type || 'Service';
+        const billingType = serviceObj?.billing_type || revenueEvent?.billing_type || '';
+        const serviceIsRenewal = serviceObj?.is_renewal === true;
+        const dealIsRenewal = entry.deals?.is_renewal || false;
+        const isRenewal = serviceIsRenewal || dealIsRenewal;
         
-        // For renewals, get original proposal value from original_deal_value or fetch from original deal
-        const isRenewal = entry.deals?.is_renewal || false;
         let originalProposalValue = entry.deals?.deal_value || 0;
-        
         if (isRenewal) {
-          // For renewals, prefer original_deal_value if set, otherwise use deal_value as fallback
-          originalProposalValue = entry.deals?.original_deal_value || entry.deals?.deal_value || 0;
+          originalProposalValue = entry.deals?.original_deal_value ?? entry.deals?.deal_value ?? 0;
         }
         
         return {
@@ -202,11 +208,11 @@ export async function GET(request: NextRequest) {
           original_proposal_value: originalProposalValue,
           is_renewal: isRenewal,
           payout_months: entry.deals?.payout_months || 12,
-          amount_collected: revenueEvent?.amount_collected || 0,
+          amount_collected: revenueEvent?.amount_collected ?? 0,
           collection_date: revenueEvent?.collection_date || '',
           payment_stage: revenueEvent?.payment_stage || '',
-          service_name: serviceName || '',
-          billing_type: billingType || '',
+          service_name: serviceName,
+          billing_type: billingType,
         };
       });
 
@@ -293,114 +299,75 @@ export async function GET(request: NextRequest) {
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(workbook, summarySheet, 'Monthly Summary');
 
-    // Create Deal Breakdown sheet - groups by deal to show all commission entries per deal
-    const dealBreakdown = new Map<string, {
-      deal_id: string;
-      client_name: string;
-      bdr_name: string;
-      service_type: string;
-      deal_value: number;
-      original_proposal_value: number;
-      is_renewal: boolean;
-      close_date: string;
-      total_commission: number;
-      this_month_commission: number;
-      entries: any[];
-    }>();
-
-    entries.forEach(entry => {
-      const dealKey = entry.deal_id;
-      const entryPayableMonth = entry.payable_date
-        ? entry.payable_date.substring(0, 7)
-        : entry.accrual_date
-          ? entry.accrual_date.substring(0, 7)
-          : entry.month
-            ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
-            : 'unknown';
-      
-      if (!dealBreakdown.has(dealKey)) {
-        dealBreakdown.set(dealKey, {
-          deal_id: entry.deal_id,
-          client_name: entry.client_name,
-          bdr_name: entry.bdr_name,
-          service_type: entry.service_type,
-          deal_value: Number(entry.deal_value || 0),
-          original_proposal_value: Number(entry.original_proposal_value || entry.deal_value || 0),
-          is_renewal: entry.is_renewal || false,
-          close_date: entry.close_date || '',
-          total_commission: 0,
-          this_month_commission: 0,
-          entries: [],
-        });
-      }
-
-      const dealData = dealBreakdown.get(dealKey)!;
-      const entryAmount = Number(entry.amount || 0);
-      dealData.total_commission += entryAmount;
-      
-      // If this entry is for the filtered month (or if no month filter, count all)
-      if (!payableMonth || entryPayableMonth === payableMonth) {
-        dealData.this_month_commission += entryAmount;
-      }
-      
-      dealData.entries.push(entry);
-    });
-
-    // Create simplified deal breakdown sheet data
-    // For renewals: show uplift amount and note that commission is only on uplift
-    const dealBreakdownHeaders = [
+    // Create Service Commission Detail sheet - one row per commission entry (each billed service payment)
+    // Shows: each service, bill amount for that period, commission earned, renewal status
+    const detailHeaders = [
       'Client Name',
       'BDR Name',
-      'Service Type',
-      'Deal Value',
-      'Original Proposal Value',
-      'Uplift Amount (Renewals Only)',
+      'Service Name',
+      'Billing Type',
+      'Payable Period',
+      'Bill Amount (This Period)',
+      'Commission (This Period)',
       'Is Renewal',
       'Close Date',
-      'Total Commission (All Months)',
-      payableMonth ? `Commission (${payableMonth})` : 'Commission (This Export)',
+      'Deal Value',
+      'Status',
     ];
 
-    const dealBreakdownData: any[] = [dealBreakdownHeaders];
+    const detailData: any[] = [detailHeaders];
 
-    Array.from(dealBreakdown.values())
-      .sort((a, b) => a.client_name.localeCompare(b.client_name))
-      .forEach(deal => {
-        // Calculate uplift for renewals (renewal value - original value)
-        const upliftAmount = deal.is_renewal 
-          ? Math.max(0, deal.deal_value - deal.original_proposal_value)
-          : 0;
+    entries
+      .sort((a, b) => {
+        const monthA = a.payable_date?.substring(0, 7) || a.accrual_date?.substring(0, 7) || a.month?.substring?.(0, 7) || '';
+        const monthB = b.payable_date?.substring(0, 7) || b.accrual_date?.substring(0, 7) || b.month?.substring?.(0, 7) || '';
+        if (monthA !== monthB) return monthA.localeCompare(monthB);
+        if (a.client_name !== b.client_name) return a.client_name.localeCompare(b.client_name);
+        return (a.service_name || '').localeCompare(b.service_name || '');
+      })
+      .forEach(entry => {
+        const entryPayableMonth = entry.payable_date
+          ? entry.payable_date.substring(0, 7)
+          : entry.accrual_date
+            ? entry.accrual_date.substring(0, 7)
+            : entry.month
+              ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : String(entry.month || '').substring(0, 7))
+              : '';
+        const billAmount = Number(entry.amount_collected ?? 0);
+        const commissionAmount = Number(entry.amount ?? 0);
         
-        dealBreakdownData.push([
-          deal.client_name,
-          deal.bdr_name,
-          deal.service_type,
-          deal.deal_value.toFixed(2),
-          deal.is_renewal ? deal.original_proposal_value.toFixed(2) : '',
-          deal.is_renewal ? upliftAmount.toFixed(2) : '',
-          deal.is_renewal ? 'Yes' : 'No',
-          deal.close_date || '',
-          deal.total_commission.toFixed(2),
-          deal.this_month_commission.toFixed(2),
+        detailData.push([
+          entry.client_name || '',
+          entry.bdr_name || '',
+          entry.service_name || entry.service_type || 'Service',
+          entry.billing_type || '',
+          entryPayableMonth || '',
+          billAmount > 0 ? billAmount.toFixed(2) : '',
+          commissionAmount.toFixed(2),
+          entry.is_renewal ? 'Yes' : 'No',
+          entry.close_date || '',
+          Number(entry.deal_value || 0).toFixed(2),
+          entry.status || '',
         ]);
       });
 
-    const dealBreakdownSheet = XLSX.utils.aoa_to_sheet(dealBreakdownData);
-    const dealColWidths = [
+    const detailSheet = XLSX.utils.aoa_to_sheet(detailData);
+    const detailColWidths = [
       { wch: 25 }, // Client Name
       { wch: 20 }, // BDR Name
-      { wch: 20 }, // Service Type
-      { wch: 15 }, // Deal Value
-      { wch: 20 }, // Original Proposal Value
-      { wch: 25 }, // Uplift Amount (Renewals Only)
-      { wch: 12 }, // Is Renewal
+      { wch: 25 }, // Service Name
+      { wch: 14 }, // Billing Type
+      { wch: 12 }, // Payable Period
+      { wch: 22 }, // Bill Amount (This Period)
+      { wch: 22 }, // Commission (This Period)
+      { wch: 10 }, // Is Renewal
       { wch: 12 }, // Close Date
-      { wch: 25 }, // Total Commission (All Months)
-      { wch: 25 }, // Commission (This Month/Export)
+      { wch: 12 }, // Deal Value
+      { wch: 10 }, // Status
     ];
-    dealBreakdownSheet['!cols'] = dealColWidths;
+    detailSheet['!cols'] = detailColWidths;
     
-    XLSX.utils.book_append_sheet(workbook, dealBreakdownSheet, 'Deal Breakdown');
+    XLSX.utils.book_append_sheet(workbook, detailSheet, 'Service Commission Detail');
 
     // Generate Excel file buffer
     const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });

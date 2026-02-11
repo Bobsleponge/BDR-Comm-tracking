@@ -30,6 +30,10 @@ export async function POST(request: NextRequest) {
         return apiError('Deal not found', 404);
       }
 
+      // Delete existing revenue events and commission entries (prevents duplicates)
+      db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
+      db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
+
       // Create revenue events for the deal
       await createRevenueEventsForDeal(dealId);
 
@@ -65,6 +69,10 @@ export async function POST(request: NextRequest) {
     if (dealError || !deal) {
       return apiError('Deal not found', 404);
     }
+
+    // Delete existing revenue events and commission entries (prevents duplicates)
+    await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
+    await (supabase as any).from('revenue_events').delete().eq('deal_id', dealId);
 
     // Create revenue events for the deal
     await createRevenueEventsForDeal(dealId);

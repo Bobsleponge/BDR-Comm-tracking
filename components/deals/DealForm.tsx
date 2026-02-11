@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ServiceForm } from './ServiceForm';
-import { calculateServiceCommission, calculateDealTotalCommission } from '@/lib/commission/calculator';
+import { calculateServiceCommission, calculateDealTotalCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Trash2, Edit2, Plus } from 'lucide-react';
 
@@ -40,6 +40,7 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
   const [isAdmin, setIsAdmin] = useState(false);
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [addingService, setAddingService] = useState(false);
+  const [updatingServiceId, setUpdatingServiceId] = useState<string | null>(null);
 
   const [formData, setFormData] = useState({
     client_id: initialData?.client_id || '',
@@ -129,6 +130,22 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     }
   }, [services]);
 
+  const buildServicePayload = (s: any) => ({
+    service_name: s.service_name,
+    service_type: s.service_type,
+    billing_type: s.billing_type,
+    unit_price: s.billing_type === 'mrr' || s.billing_type === 'quarterly' ? 0 : (s.unit_price ?? 0),
+    monthly_price: s.billing_type === 'mrr' ? (s.monthly_price ?? null) : null,
+    quarterly_price: s.billing_type === 'quarterly' ? (s.quarterly_price ?? null) : null,
+    quantity: s.quantity ?? 1,
+    contract_months: s.contract_months ?? 12,
+    contract_quarters: s.contract_quarters ?? 4,
+    commission_rate: s.commission_rate ?? null,
+    completion_date: s.completion_date || null,
+    is_renewal: !!(s.is_renewal === true || s.is_renewal === 1),
+    original_service_value: (s.is_renewal === true || s.is_renewal === 1) ? (s.original_service_value ?? null) : null,
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -144,6 +161,7 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         credentials: 'include',
         body: JSON.stringify({
           ...formData,
+          bdr_id: formData.bdr_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(formData.bdr_id) ? formData.bdr_id : undefined,
           deal_value: parseFloat(formData.deal_value.toString()),
           payout_months: parseInt(formData.payout_months.toString()),
           is_renewal: formData.is_renewal,
@@ -161,7 +179,27 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         throw new Error(data.error || 'Failed to save deal');
       }
 
-      router.push(`/deals${dealId ? `/${dealId}` : ''}`);
+      const savedDealId = dealId || data?.id;
+      if (!savedDealId) throw new Error('No deal ID returned');
+
+      // For new deals: create services via API (triggers commission entry creation)
+      if (!dealId && services.length > 0) {
+        for (const service of services) {
+          const payload = buildServicePayload(service);
+          const svcRes = await fetch(`/api/deals/${savedDealId}/services`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(payload),
+          });
+          const svcData = await safeJsonParse(svcRes);
+          if (!svcRes.ok || svcData.error) {
+            throw new Error(svcData.error || `Failed to save service: ${service.service_name}`);
+          }
+        }
+      }
+
+      router.push(`/deals/${savedDealId}`);
       router.refresh();
     } catch (err: any) {
       setError(err.message || 'Failed to save deal');
@@ -184,9 +222,27 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         serviceData.commission_rate || null,
         baseCommissionRate
       );
-      // Generate a temporary ID for new services
+      let commissionableValue = calc.commissionable_value;
+      let commissionAmount = calc.commission_amount;
+      const isRenewal = !!serviceData.is_renewal;
+      const originalServiceValue = serviceData.original_service_value ?? null;
+      if (isRenewal && originalServiceValue != null) {
+        const rate = serviceData.commission_rate ?? baseCommissionRate;
+        commissionAmount = Number(calculateRenewalCommission(
+          calc.commissionable_value,
+          originalServiceValue,
+          rate
+        ).toFixed(2));
+      }
       const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      setServices([...services, { ...serviceData, ...calc, id: tempId }]);
+      setServices([...services, {
+        ...serviceData,
+        commissionable_value: commissionableValue,
+        commission_amount: commissionAmount,
+        is_renewal: isRenewal ? 1 : 0,
+        original_service_value: originalServiceValue,
+        id: tempId,
+      }]);
       setAddingService(false);
       return;
     }
@@ -213,12 +269,43 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
 
   const handleUpdateService = async (serviceData: any) => {
     if (!dealId || !serviceData.id) {
-      // For new deals, update in local state
-      setServices(services.map(s => s.id === serviceData.id ? serviceData : s));
+      // For new deals, update in local state and recalculate commission
+      const calc = calculateServiceCommission(
+        serviceData.billing_type,
+        serviceData.unit_price,
+        serviceData.monthly_price || null,
+        serviceData.quarterly_price || null,
+        serviceData.quantity,
+        serviceData.contract_months,
+        serviceData.contract_quarters,
+        serviceData.commission_rate || null,
+        baseCommissionRate
+      );
+      let commissionAmount = calc.commission_amount;
+      const isRenewal = !!serviceData.is_renewal;
+      const originalServiceValue = serviceData.original_service_value ?? null;
+      if (isRenewal && originalServiceValue != null) {
+        const rate = serviceData.commission_rate ?? baseCommissionRate;
+        commissionAmount = Number(calculateRenewalCommission(
+          calc.commissionable_value,
+          originalServiceValue,
+          rate
+        ).toFixed(2));
+      }
+      const updated = {
+        ...serviceData,
+        commissionable_value: calc.commissionable_value,
+        commission_amount: commissionAmount,
+        is_renewal: isRenewal ? 1 : 0,
+        original_service_value: originalServiceValue,
+      };
+      setServices(services.map(s => s.id === serviceData.id ? updated : s));
       setEditingServiceId(null);
       return;
     }
 
+    setError('');
+    setUpdatingServiceId(serviceData.id);
     try {
       const res = await fetch(`/api/deals/${dealId}/services/${serviceData.id}`, {
         method: 'PATCH',
@@ -236,6 +323,8 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       setEditingServiceId(null);
     } catch (err: any) {
       setError(err.message || 'Failed to update service');
+    } finally {
+      setUpdatingServiceId(null);
     }
   };
 
@@ -287,13 +376,14 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
+    <div className="space-y-6">
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
           {error}
         </div>
       )}
 
+      <form onSubmit={handleSubmit} className="space-y-6">
       {/* Basic Deal Information */}
       <Card>
         <CardHeader>
@@ -468,16 +558,21 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
               )}
             </div>
 
-            {formData.original_deal_value !== null && (
+            {formData.is_renewal && (
               <div>
-                <Label htmlFor="original_deal_value">Original Deal Value</Label>
+                <Label htmlFor="original_deal_value">Original Deal Value (Previous Amount)</Label>
                 <Input
                   id="original_deal_value"
                   type="number"
                   step="0.01"
-                  value={formData.original_deal_value || ''}
+                  min="0"
+                  value={formData.original_deal_value ?? ''}
                   onChange={(e) => setFormData({ ...formData, original_deal_value: e.target.value ? parseFloat(e.target.value) : null })}
+                  placeholder="Amount from previous deal"
                 />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Commission will be calculated on uplift (proposal value minus this amount)
+                </p>
               </div>
             )}
           </div>
@@ -518,7 +613,12 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         </CardContent>
       </Card>
 
-      {/* Services Section */}
+      <Button type="submit" disabled={loading} className="w-full">
+        {loading ? 'Saving...' : dealId ? 'Update Deal' : 'Create Deal'}
+      </Button>
+      </form>
+
+      {/* Services Section - outside form to avoid nested forms (ServiceForm has its own form) */}
       <Card>
         <CardHeader>
           <div className="flex justify-between items-center">
@@ -542,9 +642,16 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
               baseCommissionRate={baseCommissionRate}
               onSubmit={handleAddService}
               onCancel={() => setAddingService(false)}
+              dealIsRenewal={formData.is_renewal}
+              dealOriginalValue={formData.original_deal_value}
             />
           )}
 
+          {error && editingServiceId && (
+            <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded text-sm">
+              {error}
+            </div>
+          )}
           {services.map((service) => {
             if (editingServiceId === service.id) {
               return (
@@ -553,7 +660,8 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
                   service={service}
                   baseCommissionRate={baseCommissionRate}
                   onSubmit={handleUpdateService}
-                  onCancel={() => setEditingServiceId(null)}
+                  onCancel={() => { setEditingServiceId(null); setError(''); }}
+                  isSubmitting={updatingServiceId === service.id}
                 />
               );
             }
@@ -562,7 +670,14 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
               <div key={service.id} className="p-4 border rounded-lg bg-gray-50">
                 <div className="flex justify-between items-start mb-3">
                   <div className="flex-1">
-                    <h4 className="font-medium text-lg">{service.service_name}</h4>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="font-medium text-lg">{service.service_name}</h4>
+                      {(service.is_renewal === true || service.is_renewal === 1) && (
+                        <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200/60">
+                          Renewal
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm text-gray-600">
                       {service.service_type && <span className="font-medium">{service.service_type}</span>}
                       {service.service_type && ' • '}
@@ -628,6 +743,12 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
                     <span className="text-gray-600">Commissionable Value:</span>
                     <p className="font-medium">{formatCurrency(service.commissionable_value)}</p>
                   </div>
+                  {(service.is_renewal === true || service.is_renewal === 1) && service.original_service_value != null && (
+                    <div>
+                      <span className="text-gray-600">Previous Deal Amount:</span>
+                      <p className="font-medium">{formatCurrency(service.original_service_value)}</p>
+                    </div>
+                  )}
                   <div>
                     <span className="text-gray-600">Commission Amount:</span>
                     <p className="font-medium">{formatCurrency(service.commission_amount)}</p>
@@ -661,10 +782,6 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
           )}
         </CardContent>
       </Card>
-
-      <Button type="submit" disabled={loading} className="w-full">
-        {loading ? 'Saving...' : dealId ? 'Update Deal' : 'Create Deal'}
-      </Button>
-    </form>
+    </div>
   );
 }

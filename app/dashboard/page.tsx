@@ -82,10 +82,6 @@ export default function DashboardPage() {
     dedupingInterval: 60000,
   });
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/dashboard/page.tsx:82',message:'dealsRaw value check',data:{type:typeof dealsRaw,isArray:Array.isArray(dealsRaw),hasData:!!dealsRaw?.data,hasPagination:!!dealsRaw?.pagination},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
-  
   // Extract deals array from paginated response
   const deals: Deal[] = Array.isArray(dealsRaw) 
     ? dealsRaw 

@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, canAccessBdr } from '@/lib/utils/api-helpers';
 import { dealServiceUpdateSchema } from '@/lib/commission/validators';
-import { calculateServiceCommission } from '@/lib/commission/calculator';
+import { calculateServiceCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -93,7 +93,7 @@ export async function PATCH(
         ...updateData,
       };
 
-      // Calculate commission if pricing fields changed
+      // Calculate commission - for renewals use uplift, otherwise standard calculation
       const baseRate = await getBaseCommissionRate();
       const commission = calculateServiceCommission(
         mergedData.billing_type,
@@ -107,7 +107,28 @@ export async function PATCH(
         baseRate
       );
 
-      // Update service
+      // Determine values for renewal fields (handle both direct update and merged from existing)
+      const isRenewal = updateData.is_renewal !== undefined
+        ? (updateData.is_renewal ? 1 : 0)
+        : (service.is_renewal ?? 0);
+      const originalServiceValue = updateData.original_service_value !== undefined
+        ? updateData.original_service_value
+        : service.original_service_value;
+
+      // For renewal services: commission on uplift only
+      let commissionableValue = commission.commissionable_value;
+      let commissionAmount = commission.commission_amount;
+      if (isRenewal && originalServiceValue != null) {
+        const uplift = Math.max(0, commission.commissionable_value - originalServiceValue);
+        const rate = mergedData.commission_rate ?? baseRate;
+        commissionAmount = Number(calculateRenewalCommission(
+          commission.commissionable_value,
+          originalServiceValue,
+          rate
+        ).toFixed(2));
+      }
+
+      const toBind = (v: any): string | number | null => (v === undefined ? null : (typeof v === 'boolean' ? (v ? 1 : 0) : v));
       db.prepare(`
         UPDATE deal_services SET
           service_name = ?,
@@ -123,27 +144,45 @@ export async function PATCH(
           commissionable_value = ?,
           commission_amount = ?,
           completion_date = ?,
+          is_renewal = ?,
+          original_service_value = ?,
           updated_at = datetime('now')
         WHERE id = ?
       `).run(
         mergedData.service_name,
         mergedData.service_type,
         mergedData.billing_type,
-        mergedData.unit_price,
-        mergedData.monthly_price || null,
-        mergedData.quarterly_price || null,
-        mergedData.quantity,
-        mergedData.contract_months,
-        mergedData.contract_quarters,
-        mergedData.commission_rate || null,
-        commission.commissionable_value,
-        commission.commission_amount,
-        mergedData.completion_date || null,
+        mergedData.unit_price ?? 0,
+        toBind(mergedData.monthly_price),
+        toBind(mergedData.quarterly_price),
+        mergedData.quantity ?? 1,
+        mergedData.contract_months ?? 12,
+        mergedData.contract_quarters ?? 4,
+        toBind(mergedData.commission_rate),
+        commissionableValue,
+        commissionAmount,
+        toBind(mergedData.completion_date),
+        isRenewal,
+        toBind(originalServiceValue),
         serviceId
       );
 
       // Update deal value
       await updateDealValue(dealId);
+
+      // Reprocess deal: recreate revenue events and commission entries with updated service data
+      const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+      db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
+      db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
+      await createRevenueEventsForDeal(dealId);
+      const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(dealId) as Array<{ id: string }>;
+      for (const ev of revenueEvents) {
+        try {
+          await processRevenueEvent(ev.id);
+        } catch {
+          // Ignore individual processing errors
+        }
+      }
 
       const updatedService = db.prepare('SELECT * FROM deal_services WHERE id = ?').get(serviceId) as any;
       return apiSuccess(updatedService);
@@ -173,7 +212,7 @@ export async function PATCH(
       ...updateData,
     };
 
-    // Calculate commission
+    // Calculate commission - for renewals use uplift, otherwise standard
     const baseRate = await getBaseCommissionRate();
     const commission = calculateServiceCommission(
       mergedData.billing_type,
@@ -187,13 +226,39 @@ export async function PATCH(
       baseRate
     );
 
+    const isRenewal = updateData.is_renewal !== undefined
+      ? !!updateData.is_renewal
+      : (service.is_renewal ?? false);
+    const originalServiceValue = updateData.original_service_value !== undefined
+      ? updateData.original_service_value
+      : service.original_service_value;
+
+    let commissionableValue = commission.commissionable_value;
+    let commissionAmount = commission.commission_amount;
+    if (isRenewal && originalServiceValue != null) {
+      const rate = mergedData.commission_rate ?? baseRate;
+      commissionAmount = Number(calculateRenewalCommission(
+        commission.commissionable_value,
+        originalServiceValue,
+        rate
+      ).toFixed(2));
+    }
+
+    const updatePayload: Record<string, any> = {
+      ...updateData,
+      commissionable_value: commissionableValue,
+      commission_amount: commissionAmount,
+    };
+    if (updateData.is_renewal !== undefined) {
+      updatePayload.is_renewal = isRenewal;
+    }
+    if (updateData.original_service_value !== undefined) {
+      updatePayload.original_service_value = originalServiceValue;
+    }
+
     const { data: updatedService, error } = await (supabase as any)
       .from('deal_services')
-      .update({
-        ...updateData,
-        commissionable_value: commission.commissionable_value,
-        commission_amount: commission.commission_amount,
-      })
+      .update(updatePayload)
       .eq('id', serviceId)
       .select()
       .single();
@@ -204,6 +269,21 @@ export async function PATCH(
 
     // Update deal value
     await updateDealValue(dealId);
+
+    // Reprocess deal: recreate revenue events and commission entries
+    const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+    await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
+    await (supabase as any).from('revenue_events').delete().eq('deal_id', dealId);
+    await createRevenueEventsForDeal(dealId);
+    const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', dealId);
+    const revenueEvents = eventsResult.data || [];
+    for (const ev of revenueEvents) {
+      try {
+        await processRevenueEvent(ev.id);
+      } catch {
+        // Ignore individual processing errors
+      }
+    }
 
     return apiSuccess(updatedService);
   } catch (error: any) {
@@ -244,6 +324,23 @@ export async function DELETE(
       // Update deal value
       await updateDealValue(dealId);
 
+      // Reprocess deal: recreate revenue events and commission entries without deleted service
+      const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+      db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
+      db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
+      const remainingServices = db.prepare('SELECT id FROM deal_services WHERE deal_id = ?').all(dealId) as any[];
+      if (remainingServices.length > 0) {
+        await createRevenueEventsForDeal(dealId);
+        const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(dealId) as Array<{ id: string }>;
+        for (const ev of revenueEvents) {
+          try {
+            await processRevenueEvent(ev.id);
+          } catch {
+            // Ignore
+          }
+        }
+      }
+
       return apiSuccess({ success: true });
     }
 
@@ -276,6 +373,24 @@ export async function DELETE(
 
     // Update deal value
     await updateDealValue(dealId);
+
+    // Reprocess deal: recreate revenue events and commission entries
+    const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
+    await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
+    await (supabase as any).from('revenue_events').delete().eq('deal_id', dealId);
+    const { data: remainingServices } = await (supabase as any).from('deal_services').select('id').eq('deal_id', dealId);
+    if (remainingServices && remainingServices.length > 0) {
+      await createRevenueEventsForDeal(dealId);
+      const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', dealId);
+      const revenueEvents = eventsResult.data || [];
+      for (const ev of revenueEvents) {
+        try {
+          await processRevenueEvent(ev.id);
+        } catch {
+          // Ignore
+        }
+      }
+    }
 
     return apiSuccess({ success: true });
   } catch (error: any) {
