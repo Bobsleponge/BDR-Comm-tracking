@@ -41,6 +41,18 @@ export async function GET(
       const services = db.prepare('SELECT * FROM deal_services WHERE deal_id = ?').all(id) as any[];
       deal.deal_services = services;
 
+      // Check if deal has commission batch overrides
+      const hasOverride = db.prepare(`
+        SELECT 1 FROM commission_entries ce
+        JOIN commission_batch_items cbi ON cbi.commission_entry_id = ce.id
+        WHERE ce.deal_id = ?
+          AND (cbi.override_amount IS NOT NULL
+               OR cbi.override_payment_date IS NOT NULL
+               OR cbi.override_commission_rate IS NOT NULL)
+        LIMIT 1
+      `).get(id);
+      deal.has_override = !!hasOverride;
+
       return apiSuccess(deal, 200, { cache: 'no-store' });
     }
 
@@ -60,6 +72,23 @@ export async function GET(
     if (!(await canAccessBdr(data.bdr_id))) {
       return apiError('Forbidden', 403);
     }
+
+    // Check if deal has commission batch overrides (Supabase)
+    const { data: entries } = await (supabase as any)
+      .from('commission_entries')
+      .select('id')
+      .eq('deal_id', id);
+    const entryIds = (entries || []).map((e: any) => e.id);
+    let hasOverride = false;
+    if (entryIds.length > 0) {
+      const { data: batchItems } = await (supabase as any)
+        .from('commission_batch_items')
+        .select('commission_entry_id')
+        .in('commission_entry_id', entryIds)
+        .or('override_amount.not.is.null,override_payment_date.not.is.null,override_commission_rate.not.is.null');
+      hasOverride = (batchItems || []).length > 0;
+    }
+    data.has_override = hasOverride;
 
     return apiSuccess(data, 200, { cache: 'no-store' });
   } catch (error: any) {
@@ -83,6 +112,17 @@ export async function PATCH(
         `Validation error: ${validationResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`,
         400
       );
+    }
+
+    // All deals must remain associated to a client - reject clearing client_id
+    if ('client_id' in body) {
+      if (body.client_id === null || body.client_id === '') {
+        return apiError('Client is required. Deals cannot be unlinked from a client.', 400);
+      }
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (typeof body.client_id !== 'string' || !uuidRegex.test(body.client_id)) {
+        return apiError('Invalid client ID. Please select a valid client.', 400);
+      }
     }
 
     if (USE_LOCAL_DB) {
@@ -113,15 +153,19 @@ export async function PATCH(
                             'do_not_pay_future', 'original_deal_value', 'original_deal_id'];
       
       // Auto-calculate first_invoice_date if close_date is being updated
+      // For paid_on_completion deals: first_invoice_date = completion_date (managed by service), do not overwrite
       let firstInvoiceDate = data.first_invoice_date ?? body.first_invoice_date;
-      if ((data.close_date !== undefined || body.close_date !== undefined) && !firstInvoiceDate) {
+      const hasPaidOnCompletion = db.prepare(
+        'SELECT 1 FROM deal_services WHERE deal_id = ? AND billing_type = ? AND completion_date IS NOT NULL LIMIT 1'
+      ).get(id, 'paid_on_completion');
+      if (!hasPaidOnCompletion && (data.close_date !== undefined || body.close_date !== undefined) && !firstInvoiceDate) {
         const baseDate = (data.close_date ?? body.close_date) || deal.proposal_date;
         if (baseDate) {
           const baseDateObj = typeof baseDate === 'string' ? parseISO(baseDate) : new Date(baseDate);
           const calculatedDate = addDays(baseDateObj, 7);
           firstInvoiceDate = format(calculatedDate, 'yyyy-MM-dd');
         }
-      } else if ((data.proposal_date !== undefined || body.proposal_date !== undefined) && !data.close_date && !body.close_date && !firstInvoiceDate && !deal.close_date) {
+      } else if (!hasPaidOnCompletion && (data.proposal_date !== undefined || body.proposal_date !== undefined) && !data.close_date && !body.close_date && !firstInvoiceDate && !deal.close_date) {
         const baseDate = data.proposal_date ?? body.proposal_date;
         if (baseDate) {
           const baseDateObj = typeof baseDate === 'string' ? parseISO(baseDate) : new Date(baseDate);
@@ -225,16 +269,24 @@ export async function PATCH(
     }
 
     // Auto-calculate first_invoice_date if close_date is being updated
+    // For paid_on_completion deals: first_invoice_date = completion_date (managed by service), do not overwrite
     const updateBody = { ...body };
-    if (body.close_date !== undefined && !body.first_invoice_date) {
+    const { data: pocCheck } = await (supabase as any)
+      .from('deal_services')
+      .select('id')
+      .eq('deal_id', id)
+      .eq('billing_type', 'paid_on_completion')
+      .not('completion_date', 'is', null)
+      .limit(1);
+    const hasPaidOnCompletion = pocCheck && pocCheck.length > 0;
+    if (!hasPaidOnCompletion && body.close_date !== undefined && !body.first_invoice_date) {
       const baseDate = body.close_date || existingDeal.proposal_date;
       if (baseDate) {
         const baseDateObj = typeof baseDate === 'string' ? parseISO(baseDate) : new Date(baseDate);
         const calculatedDate = addDays(baseDateObj, 7);
         updateBody.first_invoice_date = format(calculatedDate, 'yyyy-MM-dd');
       }
-    } else if (body.proposal_date !== undefined && !body.close_date && !body.first_invoice_date && !existingDeal.close_date) {
-      // If proposal_date is updated and there's no close_date, calculate from proposal_date
+    } else if (!hasPaidOnCompletion && body.proposal_date !== undefined && !body.close_date && !body.first_invoice_date && !existingDeal.close_date) {
       const baseDate = body.proposal_date;
       if (baseDate) {
         const baseDateObj = typeof baseDate === 'string' ? parseISO(baseDate) : new Date(baseDate);

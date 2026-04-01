@@ -57,6 +57,16 @@ npm run dev
 
 The database (`local.db`) will be automatically created on first run. See [LOCAL_SETUP.md](LOCAL_SETUP.md) for more details.
 
+### Docker (When Local Dev Fails)
+
+If the app doesn't launch properly with `npm run dev`, use Docker:
+
+1. Start Docker Desktop
+2. Run: `docker compose up --build -d`
+3. Open [http://localhost:3000](http://localhost:3000)
+
+See [DOCKER.md](DOCKER.md) for full instructions.
+
 ### Supabase Mode (Production)
 
 To use Supabase instead of local SQLite:

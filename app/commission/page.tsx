@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { AuthGuard } from '@/components/shared/AuthGuard';
 import { Layout } from '@/components/shared/Layout';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
@@ -8,7 +10,6 @@ import { CommissionSummary } from '@/components/commission/CommissionSummary';
 import { CommissionEntriesTable } from '@/components/commission/CommissionEntriesTable';
 import { CommissionBreakdown } from '@/components/commission/CommissionBreakdown';
 import { CommissionVerification } from '@/components/commission/CommissionVerification';
-import { createClient } from '@/lib/supabase/client';
 import { exportCommissionToCSV } from '@/lib/utils/csv-export';
 import useSWR from 'swr';
 import { Button } from '@/components/ui/button';
@@ -17,6 +18,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { FileText, Plus, Undo2 } from 'lucide-react';
 
 interface CommissionSummary {
   earned: number;
@@ -28,7 +33,7 @@ interface CommissionSummary {
 interface CommissionEntry {
   id: string;
   month: string;
-  amount: number;
+  amount: number | null;
   status: 'pending' | 'paid' | 'cancelled';
   deals?: {
     client_name: string;
@@ -47,6 +52,7 @@ const fetcher = async (url: string) => {
 };
 
 export default function CommissionPage() {
+  const router = useRouter();
   const [summary, setSummary] = useState<CommissionSummary | null>(null);
   const [entries, setEntries] = useState<CommissionEntry[]>([]);
   const [breakdown, setBreakdown] = useState<any>(null);
@@ -56,26 +62,49 @@ export default function CommissionPage() {
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
   
   const [reprocessing, setReprocessing] = useState(false);
+  const [generateReportLoading, setGenerateReportLoading] = useState(false);
+  const [unapprovingId, setUnapprovingId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'table' | 'breakdown' | 'verify'>('breakdown');
   const [filters, setFilters] = useState<{ serviceType?: string; billingType?: string }>({});
 
-  // Generate list of months (current month and next 12 months)
+  // Generate list of months: all months with commission (from breakdown) + wide fallback range
   const getAvailableMonths = () => {
-    const months: string[] = [];
+    const months = new Set<string>();
+    // Include all months from breakdown (covers commission due in any month, including far future)
+    if (breakdown?.breakdown?.length) {
+      breakdown.breakdown.forEach((m: { month: string }) => months.add(m.month));
+    }
+    // Fallback range: 2 years back to 5 years forward
     const today = new Date();
-    for (let i = -6; i <= 12; i++) {
+    for (let i = -24; i <= 60; i++) {
       const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
       const monthStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      const monthLabel = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-      months.push(monthStr);
+      months.add(monthStr);
     }
-    return months;
+    return Array.from(months).sort();
   };
 
   const formatMonthLabel = (monthStr: string) => {
     const [year, month] = monthStr.split('-');
     const date = new Date(parseInt(year), parseInt(month) - 1, 1);
     return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  };
+
+  const formatMoneyShort = (n: number) =>
+    n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const monthLabelWithApproval = (monthStr: string) => {
+    const base = formatMonthLabel(monthStr);
+    const rows = breakdown?.breakdown as Array<{ month: string; entries?: Array<{ isApproved?: boolean; amount: number }> }> | undefined;
+    const row = rows?.find((m) => m.month === monthStr);
+    if (!row?.entries?.length) return base;
+    const approved = row.entries
+      .filter((e) => e.isApproved === true)
+      .reduce((s, e) => s + Number(e.amount ?? 0), 0);
+    const left = row.entries
+      .filter((e) => e.isApproved !== true)
+      .reduce((s, e) => s + Number(e.amount ?? 0), 0);
+    return `${base} · $${formatMoneyShort(approved)} approved · $${formatMoneyShort(left)} left`;
   };
 
   // Check admin status once using API
@@ -118,6 +147,70 @@ export default function CommissionPage() {
     revalidateOnReconnect: false,
     dedupingInterval: 60000,
   });
+
+  const { data: batchesData, mutate: mutateBatches } = useSWR('/api/commission/batches', fetcher, {
+    revalidateOnFocus: false,
+    dedupingInterval: 10000,
+  });
+
+  const batches = batchesData?.data ?? [];
+
+  const handleUnapprove = async (batchId: string) => {
+    if (!confirm('Revert this report to draft? You will be able to edit it and approve again after fixing any issues.')) return;
+    setUnapprovingId(batchId);
+    try {
+      const res = await fetch(`/api/commission/batches/${batchId}/unapprove`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+      const data = await safeJsonParse(res);
+      if (!res.ok || data?.error) {
+        throw new Error(data?.error || 'Failed to revert to draft');
+      }
+      mutateBatches();
+      mutateSummary();
+      mutateEntries();
+      mutateBreakdown();
+    } catch (err: any) {
+      alert(err.message || 'Failed to revert to draft');
+    } finally {
+      setUnapprovingId(null);
+    }
+  };
+
+  const handleGenerateReport = async () => {
+    setGenerateReportLoading(true);
+    try {
+      const res = await fetch('/api/commission/batches', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to generate report');
+      }
+      mutateBatches();
+      mutateSummary();
+      mutateEntries();
+      mutateBreakdown();
+      router.push(`/commission/batches/${data.id}`);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setGenerateReportLoading(false);
+    }
+  };
+
+  const formatRunDate = (dateStr: string) => {
+    if (!dateStr) return '—';
+    const [y, m, d] = dateStr.split('-');
+    return new Date(parseInt(y), parseInt(m) - 1, parseInt(d || '1')).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  };
 
   // Progressive loading - show data as it arrives, don't wait for everything
   useEffect(() => {
@@ -308,7 +401,7 @@ export default function CommissionPage() {
                 <SelectItem value="all">All Months</SelectItem>
                 {getAvailableMonths().map((month) => (
                   <SelectItem key={month} value={month}>
-                    {formatMonthLabel(month)}
+                    {monthLabelWithApproval(month)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -342,6 +435,83 @@ export default function CommissionPage() {
                 </div>
               )}
 
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <FileText className="h-5 w-5" />
+                    My Commission Reports
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Generate a report to pull eligible commissions, edit in draft, then approve and download.
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-col gap-4">
+                    <Button
+                      onClick={handleGenerateReport}
+                      disabled={generateReportLoading}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      {generateReportLoading ? 'Generating...' : 'Generate My Commission Report'}
+                    </Button>
+                    {batches.length > 0 && (
+                      <div>
+                        <h4 className="text-sm font-medium mb-2">Recent Reports</h4>
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Run Date</TableHead>
+                              <TableHead>Status</TableHead>
+                              <TableHead>Items</TableHead>
+                              <TableHead>Total</TableHead>
+                              <TableHead className="text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {batches.slice(0, 10).map((b: any) => (
+                              <TableRow key={b.id}>
+                                <TableCell>{formatRunDate(b.run_date)}</TableCell>
+                                <TableCell>
+                                  <Badge variant={b.status === 'draft' ? 'secondary' : 'default'}>
+                                    {b.status}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell>{b.item_count ?? 0}</TableCell>
+                                <TableCell>${Number(b.total_amount ?? 0).toFixed(2)}</TableCell>
+                                <TableCell className="text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    {b.status === 'approved' && (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          handleUnapprove(b.id);
+                                        }}
+                                        disabled={!!unapprovingId}
+                                        title="Revert to draft to fix issues"
+                                      >
+                                        <Undo2 className="mr-1 h-3.5 w-3.5" />
+                                        {unapprovingId === b.id ? 'Reverting...' : 'Revert'}
+                                      </Button>
+                                    )}
+                                    <Link href={`/commission/batches/${b.id}`}>
+                                      <Button variant="ghost" size="sm">
+                                        {b.status === 'draft' ? 'Edit' : 'View'}
+                                      </Button>
+                                    </Link>
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
               <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'table' | 'breakdown' | 'verify')} className="mb-6">
                 <TabsList>
                   <TabsTrigger value="breakdown">Monthly Breakdown</TabsTrigger>
@@ -370,6 +540,7 @@ export default function CommissionPage() {
                       entries={entries}
                       isAdmin={isAdmin}
                       onMarkPaid={handleMarkPaid}
+                      onAmountUpdated={() => mutateEntries()}
                     />
                   ) : !entriesError ? (
                     <Skeleton className="h-64 w-full" />

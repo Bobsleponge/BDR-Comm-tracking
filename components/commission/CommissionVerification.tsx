@@ -42,6 +42,7 @@ interface DealVerification {
   services: ServiceVerification[];
   status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count';
   message: string;
+  hasOverride?: boolean;
 }
 
 interface VerificationData {
@@ -101,7 +102,7 @@ export function CommissionVerification() {
         <CardHeader>
           <CardTitle>Commission Verification</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Verifies commission amounts and entry counts per service. Deposit: 2; One-off: 1; MRR: 12; Quarterly: 4; Renewal: 1 (uplift, due 7 days after close).
+            Verifies commission amounts and entry counts per service. Deposit: 2; One-off: 1; Paid on Completion: 1; MRR: 12; Quarterly: 4; Renewal: 1 (uplift, due 7 days after close).
           </p>
         </CardHeader>
         <CardContent>
@@ -124,7 +125,7 @@ export function CommissionVerification() {
             {data.deals.map(deal => (
               <Card key={deal.dealId}>
                 <CardHeader className="pb-2">
-                  <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       {getStatusIcon(deal.status)}
                       <div>
@@ -134,7 +135,14 @@ export function CommissionVerification() {
                         </p>
                       </div>
                     </div>
-                    {getStatusBadge(deal.status)}
+                    <div className="flex items-center gap-2">
+                      {deal.hasOverride && (
+                        <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                          Override
+                        </Badge>
+                      )}
+                      {getStatusBadge(deal.status)}
+                    </div>
                   </div>
                   <div className="text-sm text-muted-foreground mt-2">
                     Expected ${deal.expectedTotal.toFixed(2)} | Accrued ${deal.accruedTotal.toFixed(2)}

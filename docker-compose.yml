@@ -1,0 +1,18 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - USE_LOCAL_DB=true
+      - LOCAL_DB_PATH=/app/data/local.db
+    volumes:
+      - bdr-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  bdr-data:
+    driver: local

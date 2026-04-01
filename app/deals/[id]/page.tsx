@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import useSWR from 'swr';
+import { mutate } from 'swr';
 import { AuthGuard } from '@/components/shared/AuthGuard';
 import { Layout } from '@/components/shared/Layout';
 import { DealForm } from '@/components/deals/DealForm';
@@ -14,6 +16,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
+import { RefreshCw } from 'lucide-react';
+
+const fetcher = (url: string) => fetch(url, { credentials: 'include' }).then((r) => r.json());
 
 export default function DealDetailPage() {
   const params = useParams();
@@ -23,7 +28,11 @@ export default function DealDetailPage() {
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [reprocessing, setReprocessing] = useState(false);
   const [baseCommissionRate, setBaseCommissionRate] = useState(0.025);
+
+  const { data: userData } = useSWR('/api/auth/user', fetcher);
+  const isAdmin = userData?.role === 'admin' || false;
 
   useEffect(() => {
     const fetchDeal = async () => {
@@ -75,12 +84,44 @@ export default function DealDetailPage() {
       });
 
       if (!res.ok) throw new Error('Failed to cancel deal');
+      mutate('/api/dashboard/stats');
+      mutate('/api/dashboard/trend');
+      mutate((k: unknown) => typeof k === 'string' && k.startsWith('/api/deals'), undefined, { revalidate: true });
       router.refresh();
       window.location.reload();
     } catch (err: any) {
       alert(err.message);
     } finally {
       setCancelling(false);
+    }
+  };
+
+  const handleReprocess = async () => {
+    if (!isAdmin || !deal?.id) return;
+    if (!confirm('Reprocess this deal to regenerate revenue events and commission entries? This will replace any existing commission entries for this deal.')) {
+      return;
+    }
+    setReprocessing(true);
+    try {
+      const res = await fetch('/api/deals/reprocess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ dealId: deal.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to reprocess deal');
+      }
+      mutate('/api/dashboard/stats');
+      mutate('/api/dashboard/trend');
+      mutate((k: unknown) => typeof k === 'string' && k.startsWith('/api/deals'), undefined, { revalidate: true });
+      router.refresh();
+      window.location.reload();
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setReprocessing(false);
     }
   };
 
@@ -158,6 +199,17 @@ export default function DealDetailPage() {
               <Button variant="outline" onClick={() => setEditing(true)}>
                 Edit
               </Button>
+              {isAdmin && deal.deal_services?.length > 0 && (
+                <Button
+                  variant="outline"
+                  onClick={handleReprocess}
+                  disabled={reprocessing}
+                  title="Regenerate commission entries (e.g. after adding a new service)"
+                >
+                  <RefreshCw className={`h-4 w-4 mr-2 ${reprocessing ? 'animate-spin' : ''}`} />
+                  {reprocessing ? 'Reprocessing...' : 'Reprocess'}
+                </Button>
+              )}
               {deal.status === 'closed-won' && !deal.cancellation_date && (
                 <Button
                   variant="destructive"
@@ -180,6 +232,11 @@ export default function DealDetailPage() {
                 {hasRenewalService && (
                   <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
                     Renewal
+                  </Badge>
+                )}
+                {deal.has_override && (
+                  <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                    Override
                   </Badge>
                 )}
               </div>

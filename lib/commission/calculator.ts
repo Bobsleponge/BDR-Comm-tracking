@@ -151,7 +151,7 @@ export function calculateDealCommission(
  * @returns Commissionable value (for display only)
  */
 export function calculateServiceCommissionableValue(
-  billingType: 'one_off' | 'mrr' | 'deposit' | 'quarterly',
+  billingType: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales',
   unitPrice: number,
   monthlyPrice: number | null,
   quarterlyPrice: number | null,
@@ -177,9 +177,14 @@ export function calculateServiceCommissionableValue(
     return quarterlyPrice * contractQuarters * quantity;
   }
   
-  if (billingType === 'deposit') {
+  if (billingType === 'deposit' || billingType === 'paid_on_completion') {
     // Same calculation as one_off, but timing differs
     return unitPrice * quantity;
+  }
+
+  if (billingType === 'percentage_of_net_sales') {
+    // No upfront value - commission varies by month based on client net sales
+    return 0;
   }
   
   throw new Error(`Unknown billing type: ${billingType}`);
@@ -199,7 +204,7 @@ export function calculateServiceCommissionableValue(
  * @returns Object with commissionable_value and commission_amount
  */
 export function calculateServiceCommission(
-  billingType: 'one_off' | 'mrr' | 'deposit' | 'quarterly',
+  billingType: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales',
   unitPrice: number,
   monthlyPrice: number | null,
   quarterlyPrice: number | null,

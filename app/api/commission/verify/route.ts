@@ -8,7 +8,7 @@ export interface ServiceVerification {
   serviceId: string;
   serviceName: string;
   billingType: string;
-  expectedCommission: number; // From deal_services.commission_amount
+  expectedCommission: number; // From revenue_events.amount_collected * applicable rate
   accruedCommission: number; // Sum of commission_entries for this service's revenue events
   pendingCommission: number; // Future revenue events not yet processed
   expectedEntryCount: number; // Expected number of commission entries for this billing type
@@ -35,6 +35,7 @@ export interface DealVerification {
   services: ServiceVerification[];
   status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count';
   message: string;
+  hasOverride: boolean;
 }
 
 /**
@@ -103,15 +104,12 @@ export async function GET(request: NextRequest) {
         let dealMessage = '';
 
         for (const service of services) {
-          const expectedCommission = Number(service.commission_amount || 0);
-          dealExpected += expectedCommission;
-
           // Expected commission entry count by billing type
           let expectedEntryCount: number;
           const billingType = (service.billing_type || '').toLowerCase();
           if (billingType === 'deposit') {
             expectedEntryCount = service.completion_date ? 2 : 1; // First 50% + second 50% if completion_date set
-          } else if (billingType === 'one_off' || billingType === 'renewal') {
+          } else if (billingType === 'one_off' || billingType === 'renewal' || billingType === 'paid_on_completion') {
             expectedEntryCount = 1;
           } else if (billingType === 'mrr') {
             expectedEntryCount = service.contract_months ?? 12;
@@ -137,6 +135,7 @@ export async function GET(request: NextRequest) {
 
           let accruedCommission = 0;
           let pendingCommission = 0;
+          let expectedCommission = 0;
           const eventDetails: ServiceVerification['revenueEvents'] = [];
 
           for (const re of revenueEvents) {
@@ -145,6 +144,7 @@ export async function GET(request: NextRequest) {
             const commissionAmount = ce ? Number(ce.amount) : null;
             const rate = service.commission_rate ?? defaultRate;
             const expectedForEvent = re.amount_collected * rate;
+            expectedCommission += expectedForEvent;
 
             if (hasEntry) {
               accruedCommission += Number(ce!.amount);
@@ -166,6 +166,7 @@ export async function GET(request: NextRequest) {
             });
           }
 
+          dealExpected += expectedCommission;
           dealAccrued += accruedCommission;
           dealPending += pendingCommission;
 
@@ -233,6 +234,16 @@ export async function GET(request: NextRequest) {
           dealMessage = `Expected ${dealExpected.toFixed(2)}, accrued ${dealAccrued.toFixed(2)}, pending ${dealPending.toFixed(2)}`;
         }
 
+        const hasOverride = !!(db.prepare(`
+          SELECT 1 FROM commission_entries ce
+          JOIN commission_batch_items cbi ON cbi.commission_entry_id = ce.id
+          WHERE ce.deal_id = ?
+            AND (cbi.override_amount IS NOT NULL
+                 OR cbi.override_payment_date IS NOT NULL
+                 OR cbi.override_commission_rate IS NOT NULL)
+          LIMIT 1
+        `).get(deal.id));
+
         dealVerifications.push({
           dealId: deal.id,
           clientName: deal.client_name,
@@ -243,6 +254,7 @@ export async function GET(request: NextRequest) {
           services: serviceVerifications,
           status: dealStatus,
           message: dealMessage,
+          hasOverride,
         });
       }
 

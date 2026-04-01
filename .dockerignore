@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build outputs
+.next
+out
+build
+
+# Local database (will use volume in container)
+local.db
+local.db-wal
+local.db-shm
+
+# Env and secrets
+.env
+.env*.local
+
+# Git
+.git
+.gitignore
+
+# IDE and OS
+.DS_Store
+*.swp
+*.swo
+.vscode
+.idea
+.cursor
+
+# Tests and coverage
+coverage
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+
+# Docs and misc
+*.md
+!README.md
+
+# Scripts (not needed in production image)
+scripts

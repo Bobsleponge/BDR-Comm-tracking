@@ -12,7 +12,7 @@ interface ServiceFormProps {
     id?: string;
     service_name: string;
     service_type?: string;
-    billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly';
+    billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales';
     unit_price: number;
     monthly_price: number | null;
     quarterly_price: number | null;
@@ -20,6 +20,7 @@ interface ServiceFormProps {
     contract_months: number;
     contract_quarters: number;
     commission_rate: number | null;
+    billing_percentage?: number | null;
     completion_date: string | null;
     is_renewal?: boolean | number;
     original_service_value?: number | null;
@@ -38,7 +39,7 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
   const [formData, setFormData] = useState({
     service_name: service?.service_name || '',
     service_type: service?.service_type || '',
-    billing_type: service?.billing_type || 'one_off' as 'one_off' | 'mrr' | 'deposit' | 'quarterly',
+    billing_type: service?.billing_type || 'one_off' as 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales',
     unit_price: service?.unit_price || 0,
     monthly_price: service?.monthly_price || null as number | null,
     quarterly_price: service?.quarterly_price || null as number | null,
@@ -46,6 +47,7 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
     contract_months: service?.contract_months || 12,
     contract_quarters: service?.contract_quarters || 4,
     commission_rate: service?.commission_rate || null as number | null,
+    billing_percentage: service?.billing_percentage ?? null as number | null,
     completion_date: service?.completion_date || '',
     is_renewal: !!(service?.is_renewal === true || service?.is_renewal === 1) || !!dealIsRenewal,
     original_service_value: (service?.original_service_value ?? dealOriginalValue ?? null) as number | null,
@@ -57,10 +59,11 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
   useEffect(() => {
     // Recalculate when form data changes
     try {
-      if (formData.service_name && formData.unit_price >= 0) {
+      const unitPrice = formData.billing_type === 'percentage_of_net_sales' ? 0 : formData.unit_price;
+      if (formData.service_name && unitPrice >= 0) {
         const calc = calculateServiceCommission(
           formData.billing_type,
-          formData.unit_price,
+          unitPrice,
           formData.monthly_price,
           formData.quarterly_price,
           formData.quantity,
@@ -103,6 +106,17 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
       newErrors.quarterly_price = 'Quarterly price is required for quarterly billing';
     }
 
+    if (formData.billing_type === 'paid_on_completion' && !formData.completion_date) {
+      newErrors.completion_date = 'Estimated completion date is required for Paid on Completion';
+    }
+
+    if (formData.billing_type === 'percentage_of_net_sales') {
+      const bp = formData.billing_percentage;
+      if (bp == null || bp <= 0 || bp > 1) {
+        newErrors.billing_percentage = 'Billing percentage (1-100%) is required for Percentage of Net Sales';
+      }
+    }
+
     if (formData.quantity < 1) {
       newErrors.quantity = 'Quantity must be at least 1';
     }
@@ -130,7 +144,8 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
       id: service?.id,
       monthly_price: formData.billing_type === 'mrr' ? formData.monthly_price : null,
       quarterly_price: formData.billing_type === 'quarterly' ? formData.quarterly_price : null,
-      unit_price: formData.billing_type === 'mrr' || formData.billing_type === 'quarterly' ? 0 : formData.unit_price,
+      unit_price: (formData.billing_type === 'mrr' || formData.billing_type === 'quarterly' || formData.billing_type === 'percentage_of_net_sales') ? 0 : formData.unit_price,
+      billing_percentage: formData.billing_type === 'percentage_of_net_sales' ? formData.billing_percentage : null,
       completion_date: formData.completion_date || null,
       commission_rate: formData.commission_rate || null,
       is_renewal: formData.is_renewal,
@@ -181,7 +196,7 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
         <Label htmlFor="billing_type">Billing Type *</Label>
         <Select
           value={formData.billing_type}
-          onValueChange={(value: 'one_off' | 'mrr' | 'deposit' | 'quarterly') => {
+          onValueChange={(value: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales') => {
             setFormData({ ...formData, billing_type: value });
           }}
         >
@@ -193,11 +208,13 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
             <SelectItem value="mrr">Monthly Recurring Revenue (MRR)</SelectItem>
             <SelectItem value="quarterly">Recurring Quarterly</SelectItem>
             <SelectItem value="deposit">Deposit-Based Billing (50% / 50%)</SelectItem>
+            <SelectItem value="paid_on_completion">Paid on Completion</SelectItem>
+            <SelectItem value="percentage_of_net_sales">Percentage of Net Sales</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
-      {(formData.billing_type === 'one_off' || formData.billing_type === 'deposit') && (
+      {(formData.billing_type === 'one_off' || formData.billing_type === 'deposit' || formData.billing_type === 'paid_on_completion') && (
         <div>
           <Label htmlFor="unit_price">Unit Price *</Label>
           <Input
@@ -238,6 +255,43 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
               onChange={(e) => setFormData({ ...formData, contract_months: parseInt(e.target.value) || 12 })}
               required
             />
+            {errors.contract_months && <p className="text-sm text-red-600 mt-1">{errors.contract_months}</p>}
+          </div>
+        </>
+      )}
+
+      {formData.billing_type === 'percentage_of_net_sales' && (
+        <>
+          <div>
+            <Label htmlFor="billing_percentage">Billing Percentage (%) *</Label>
+            <Input
+              id="billing_percentage"
+              type="number"
+              step="0.01"
+              min="0.01"
+              max="100"
+              value={formData.billing_percentage != null ? formData.billing_percentage * 100 : ''}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                setFormData({ ...formData, billing_percentage: isNaN(v) ? null : v / 100 });
+              }}
+              placeholder="e.g. 5 for 5%"
+              required
+            />
+            <p className="text-xs text-muted-foreground mt-1">% of client net sales you charge them each month</p>
+            {errors.billing_percentage && <p className="text-sm text-red-600 mt-1">{errors.billing_percentage}</p>}
+          </div>
+          <div>
+            <Label htmlFor="contract_months">Contract Months *</Label>
+            <Input
+              id="contract_months"
+              type="number"
+              min="1"
+              value={formData.contract_months}
+              onChange={(e) => setFormData({ ...formData, contract_months: parseInt(e.target.value) || 12 })}
+              required
+            />
+            <p className="text-xs text-muted-foreground mt-1">Number of monthly reminder entries to create</p>
             {errors.contract_months && <p className="text-sm text-red-600 mt-1">{errors.contract_months}</p>}
           </div>
         </>
@@ -298,6 +352,23 @@ export function ServiceForm({ service, baseCommissionRate, onSubmit, onCancel, i
           <p className="text-xs text-muted-foreground mt-1">
             Date when the remaining 50% will be paid
           </p>
+        </div>
+      )}
+
+      {formData.billing_type === 'paid_on_completion' && (
+        <div>
+          <Label htmlFor="completion_date">Estimated Completion Date *</Label>
+          <Input
+            id="completion_date_poc"
+            type="date"
+            value={formData.completion_date}
+            onChange={(e) => setFormData({ ...formData, completion_date: e.target.value })}
+            required
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            When work will be completed and payment processed. Commission becomes payable 7 days after this date and appears in that month.
+          </p>
+          {errors.completion_date && <p className="text-sm text-red-600 mt-1">{errors.completion_date}</p>}
         </div>
       )}
 

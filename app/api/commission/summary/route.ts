@@ -35,10 +35,10 @@ export async function GET(request: NextRequest) {
       // Optimize: Use aggregate queries instead of fetching all rows and filtering in JavaScript
       const totals = db.prepare(`
         SELECT 
-          SUM(CASE WHEN ce.status = 'paid' THEN ce.amount ELSE 0 END) as earned,
-          SUM(CASE WHEN ce.status = 'payable' THEN ce.amount ELSE 0 END) as payable,
-          SUM(CASE WHEN ce.status = 'accrued' THEN ce.amount ELSE 0 END) as accrued,
-          SUM(CASE WHEN ce.status = 'cancelled' THEN ce.amount ELSE 0 END) as cancelled
+          SUM(CASE WHEN ce.status = 'paid' THEN COALESCE(ce.amount, 0) ELSE 0 END) as earned,
+          SUM(CASE WHEN ce.status = 'payable' THEN COALESCE(ce.amount, 0) ELSE 0 END) as payable,
+          SUM(CASE WHEN ce.status = 'accrued' THEN COALESCE(ce.amount, 0) ELSE 0 END) as accrued,
+          SUM(CASE WHEN ce.status = 'cancelled' THEN COALESCE(ce.amount, 0) ELSE 0 END) as cancelled
         FROM commission_entries ce
         INNER JOIN deals d ON ce.deal_id = d.id
         WHERE ce.bdr_id = ? AND d.cancellation_date IS NULL
@@ -88,19 +88,19 @@ export async function GET(request: NextRequest) {
     const entriesArray = entries || [];
     const earned = entriesArray
       .filter((e: any) => e.status === 'paid')
-      .reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+      .reduce((sum: number, e: any) => sum + Number(e.amount ?? 0), 0);
 
     const payable = entriesArray
       .filter((e: any) => e.status === 'payable')
-      .reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+      .reduce((sum: number, e: any) => sum + Number(e.amount ?? 0), 0);
 
     const accrued = entriesArray
       .filter((e: any) => e.status === 'accrued')
-      .reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+      .reduce((sum: number, e: any) => sum + Number(e.amount ?? 0), 0);
 
     const cancelled = entriesArray
       .filter((e: any) => e.status === 'cancelled')
-      .reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+      .reduce((sum: number, e: any) => sum + Number(e.amount ?? 0), 0);
 
     // 'pending' includes both 'payable' and 'accrued' for backward compatibility
     const pending = payable + accrued;

@@ -217,9 +217,16 @@ export default function ClientDetailPage() {
                               {format(new Date(deal.proposal_date), 'MMM d, yyyy')}
                             </TableCell>
                             <TableCell>
-                              <Badge variant={getStatusVariant(deal.status)}>
-                                {deal.status.replace('-', ' ')}
-                              </Badge>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Badge variant={getStatusVariant(deal.status)}>
+                                  {deal.status.replace('-', ' ')}
+                                </Badge>
+                                {deal.has_override && (
+                                  <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                                    Override
+                                  </Badge>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell className="font-medium">
                               ${dealValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}

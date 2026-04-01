@@ -8,9 +8,10 @@ import useSWR from 'swr';
 
 const fetcher = async (url: string) => {
   const res = await fetch(url, { credentials: 'include' });
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    throw new Error(data.error || 'Failed to fetch');
+  const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+  const data = await safeJsonParse(res);
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error || 'Failed to fetch');
   }
   return data;
 };

@@ -9,14 +9,17 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, FileSpreadsheet } from 'lucide-react';
 
 interface CommissionBreakdownEntry {
   id: string;
   amount: number;
   status: string;
+  isApproved?: boolean;
   accrualDate: string | null;
   payableDate: string | null;
+  previousDealAmount?: number | null;
+  newDealAmount?: number | null;
   deal: {
     id: string;
     clientName: string;
@@ -99,6 +102,19 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
     return format(date, 'MMMM yyyy');
   };
 
+  const formatMoney = (n: number) =>
+    `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const monthApprovalAmounts = (entries: CommissionBreakdownEntry[]) => {
+    const approvedAmount = entries
+      .filter((e) => e.isApproved === true)
+      .reduce((sum, e) => sum + e.amount, 0);
+    const leftToClaim = entries
+      .filter((e) => e.isApproved !== true)
+      .reduce((sum, e) => sum + e.amount, 0);
+    return { approvedAmount, leftToClaim };
+  };
+
   const handleExportMonth = async (month: string) => {
     try {
       const exportUrl = `/api/commission/export?payable_month=${month}`;
@@ -127,6 +143,39 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
         }
       }
       
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(`Error exporting: ${err.message}`);
+    }
+  };
+
+  const handleCommSheet = async (month: string) => {
+    const cutoff = new Date().toISOString().split('T')[0]; // YYYY-MM-DD (today)
+    try {
+      const exportUrl = `/api/commission/export?payable_month=${month}&payable_cutoff=${cutoff}`;
+      const res = await fetch(exportUrl, {
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to export comm sheet');
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const contentDisposition = res.headers.get('Content-Disposition');
+      let filename = `comm-sheet-${month}-as-of-${cutoff}.xlsx`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+        if (filenameMatch) filename = filenameMatch[1];
+      }
       link.download = filename;
       document.body.appendChild(link);
       link.click();
@@ -187,6 +236,7 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                   <SelectItem value="monthly">Monthly (MRR)</SelectItem>
                   <SelectItem value="quarterly">Quarterly</SelectItem>
                   <SelectItem value="deposit">50/50 Deposit</SelectItem>
+                  <SelectItem value="paid_on_completion">Paid on Completion</SelectItem>
                   <SelectItem value="renewal">Renewal</SelectItem>
                 </SelectContent>
               </Select>
@@ -216,6 +266,7 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
       <div className="space-y-3">
         {breakdown.map((monthData) => {
           const isExpanded = expandedMonths.has(monthData.month);
+          const { approvedAmount, leftToClaim } = monthApprovalAmounts(monthData.entries);
           return (
             <Card key={monthData.month}>
               <CardHeader>
@@ -230,10 +281,30 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                     </Button>
                     <div>
                       <CardTitle>{formatMonth(monthData.month)}</CardTitle>
-                      <div className="flex items-center gap-2 mt-1">
+                      <p className="text-sm mt-1.5 text-muted-foreground">
+                        <span className="font-medium text-green-700 dark:text-green-400">
+                          {formatMoney(approvedAmount)} approved
+                        </span>
+                        <span className="mx-1.5 text-muted-foreground/80">·</span>
+                        <span>{formatMoney(leftToClaim)} left to claim</span>
+                      </p>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
                         <span className="text-sm text-muted-foreground">
                           {monthData.entries.length} {monthData.entries.length === 1 ? 'entry' : 'entries'}
                         </span>
+                        {(() => {
+                          const approved = monthData.entries.filter(e => e.isApproved).length;
+                          const pending = monthData.entries.filter(e => e.isApproved === false).length;
+                          if (approved > 0 || pending > 0) {
+                            return (
+                              <>
+                                {approved > 0 && <Badge variant="default" className="bg-green-600/90 text-xs">{approved} approved</Badge>}
+                                {pending > 0 && <Badge variant="secondary" className="text-xs">{pending} pending</Badge>}
+                              </>
+                            );
+                          }
+                          return null;
+                        })()}
                         {monthData.entries.some(e => e.service?.billingType === 'quarterly' || e.service?.billingType === 'monthly') && (
                           <Badge variant="secondary">Recurring Services</Badge>
                         )}
@@ -250,15 +321,27 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                       </div>
                       <span className="text-xs text-muted-foreground">Claim this month</span>
                     </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleExportMonth(monthData.month)}
-                      className="flex items-center gap-2"
-                    >
-                      <Download className="h-4 w-4" />
-                      Export
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleCommSheet(monthData.month)}
+                        className="flex items-center gap-2"
+                        title={`Export commission sheet for ${formatMonth(monthData.month)} up to today (${new Date().toISOString().split('T')[0]})`}
+                      >
+                        <FileSpreadsheet className="h-4 w-4" />
+                        Comm Sheet
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleExportMonth(monthData.month)}
+                        className="flex items-center gap-2"
+                      >
+                        <Download className="h-4 w-4" />
+                        Export
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </CardHeader>
@@ -274,8 +357,11 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                           <TableHead>Close Date</TableHead>
                           <TableHead>Payable Date</TableHead>
                           <TableHead>Revenue</TableHead>
+                          <TableHead>Previous</TableHead>
+                          <TableHead>New</TableHead>
                           <TableHead>Commission</TableHead>
                           <TableHead>Status</TableHead>
+                          <TableHead>Approval</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -337,6 +423,16 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                                 ? `$${entry.revenueEvent.amountCollected.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                                 : 'N/A'}
                             </TableCell>
+                            <TableCell>
+                              {entry.previousDealAmount != null && entry.previousDealAmount > 0
+                                ? `$${entry.previousDealAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                : '—'}
+                            </TableCell>
+                            <TableCell>
+                              {entry.newDealAmount != null && entry.newDealAmount > 0
+                                ? `$${entry.newDealAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                : '—'}
+                            </TableCell>
                             <TableCell className="font-medium">
                               ${entry.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </TableCell>
@@ -344,6 +440,15 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                               <Badge variant={getStatusVariant(entry.status)}>
                                 {entry.status}
                               </Badge>
+                            </TableCell>
+                            <TableCell>
+                              {entry.isApproved !== undefined ? (
+                                <Badge variant={entry.isApproved ? 'default' : 'secondary'} className={entry.isApproved ? 'bg-green-600 hover:bg-green-600' : ''}>
+                                  {entry.isApproved ? 'Approved' : 'Pending'}
+                                </Badge>
+                              ) : (
+                                <span className="text-muted-foreground text-sm">—</span>
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}

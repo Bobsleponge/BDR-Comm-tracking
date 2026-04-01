@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
-import { addMonths, format, startOfMonth } from 'date-fns';
+import { format, startOfMonth } from 'date-fns';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -54,43 +54,38 @@ export async function GET(request: NextRequest) {
       const rules = db.prepare('SELECT * FROM commission_rules ORDER BY updated_at DESC LIMIT 1').get() as any;
       const baseRate = rules?.base_rate || 0.025;
 
-      // Group by month and calculate expected commission
+      // Group by month - include ALL months that have scheduled revenue (no limit)
       const forecast: Record<string, number> = {};
-      const todayMonth = startOfMonth(new Date());
-      
-      for (let i = 0; i < months; i++) {
-        const monthDate = addMonths(todayMonth, i);
-        const monthKey = format(monthDate, 'yyyy-MM-dd');
-        forecast[monthKey] = 0;
-      }
 
       // Calculate commission for each revenue event and group by month
       revenueEvents.forEach(event => {
         const collectionDate = new Date(event.collection_date);
         const monthKey = format(startOfMonth(collectionDate), 'yyyy-MM-dd');
         
-        if (forecast[monthKey] !== undefined) {
-          // Calculate commission rate
-          let rate = baseRate;
-          if (event.commission_rate) {
-            rate = event.commission_rate;
-          } else if (event.service_type) {
-            const servicePricing = db.prepare('SELECT * FROM service_pricing WHERE service_type = ?').get(event.service_type) as any;
-            if (servicePricing?.commission_percent) {
-              rate = servicePricing.commission_percent;
-            }
+        if (!forecast[monthKey]) forecast[monthKey] = 0;
+        
+        // Calculate commission rate
+        let rate = baseRate;
+        if (event.commission_rate) {
+          rate = event.commission_rate;
+        } else if (event.service_type) {
+          const servicePricing = db.prepare('SELECT * FROM service_pricing WHERE service_type = ?').get(event.service_type) as any;
+          if (servicePricing?.commission_percent) {
+            rate = servicePricing.commission_percent;
           }
-          
-          const commission = event.amount_collected * rate;
-          forecast[monthKey] += Number(commission.toFixed(2));
         }
+        
+        const commission = event.amount_collected * rate;
+        forecast[monthKey] += Number(commission.toFixed(2));
       });
 
-      // Convert to array format
-      const forecastArray = Object.entries(forecast).map(([month, amount]) => ({
-        month,
-        amount: Number(amount.toFixed(2)),
-      }));
+      // Convert to array format, sorted by month
+      const forecastArray = Object.entries(forecast)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, amount]) => ({
+          month,
+          amount: Number(amount.toFixed(2)),
+        }));
 
       return apiSuccess(forecastArray);
     }
@@ -130,42 +125,35 @@ export async function GET(request: NextRequest) {
     
     const baseRate = rules?.base_rate || 0.025;
 
-    // Group by month
+    // Group by month - include ALL months that have scheduled revenue (no limit)
     const forecast: Record<string, number> = {};
-    const todayMonth = startOfMonth(new Date());
-    
-    for (let i = 0; i < months; i++) {
-      const monthDate = addMonths(todayMonth, i);
-      const monthKey = format(monthDate, 'yyyy-MM-dd');
-      forecast[monthKey] = 0;
-    }
 
     // Calculate commission for each revenue event
     revenueEvents.forEach((event: any) => {
       const collectionDate = new Date(event.collection_date);
       const monthKey = format(startOfMonth(collectionDate), 'yyyy-MM-dd');
       
-      if (forecast[monthKey] !== undefined) {
-        // Calculate commission rate
-        let rate = baseRate;
-        if (event.deal_services?.commission_rate) {
-          rate = event.deal_services.commission_rate;
-        } else if (event.deals?.service_type) {
-          // Would need to fetch service_pricing, but for now use base rate
-          // In production, you might want to join this in the query
-          rate = baseRate;
-        }
-        
-        const commission = event.amount_collected * rate;
-        forecast[monthKey] += Number(commission.toFixed(2));
+      if (!forecast[monthKey]) forecast[monthKey] = 0;
+      
+      // Calculate commission rate
+      let rate = baseRate;
+      if (event.deal_services?.commission_rate) {
+        rate = event.deal_services.commission_rate;
+      } else if (event.deals?.service_type) {
+        rate = baseRate;
       }
+      
+      const commission = event.amount_collected * rate;
+      forecast[monthKey] += Number(commission.toFixed(2));
     });
 
-    // Convert to array format
-    const forecastArray = Object.entries(forecast).map(([month, amount]) => ({
-      month,
-      amount: Number(amount.toFixed(2)),
-    }));
+    // Convert to array format, sorted by month
+    const forecastArray = Object.entries(forecast)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, amount]) => ({
+        month,
+        amount: Number(amount.toFixed(2)),
+      }));
 
     return apiSuccess(forecastArray);
   } catch (error: any) {

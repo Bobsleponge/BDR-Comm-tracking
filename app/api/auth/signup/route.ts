@@ -5,6 +5,14 @@ import { createLocalSession } from '@/lib/db/local-auth';
 import { createClient } from '@/lib/supabase/server';
 import { bdrRepSchema } from '@/lib/commission/validators';
 
+function isSecureRequest(request: NextRequest): boolean {
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  if (forwardedProto) {
+    return forwardedProto.split(',')[0].trim() === 'https';
+  }
+  return request.nextUrl.protocol === 'https:';
+}
+
 export async function POST(request: NextRequest) {
   const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -79,7 +87,7 @@ export async function POST(request: NextRequest) {
       
       response.cookies.set('local_session', result.sessionId, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
+        secure: isSecureRequest(request),
         sameSite: 'lax',
         maxAge: 60 * 60 * 24 * 7, // 7 days
         path: '/',

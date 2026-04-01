@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { mutate } from 'swr';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { ServiceForm } from './ServiceForm';
 import { calculateServiceCommission, calculateDealTotalCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -41,6 +43,10 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [addingService, setAddingService] = useState(false);
   const [updatingServiceId, setUpdatingServiceId] = useState<string | null>(null);
+  const [showCreateClientDialog, setShowCreateClientDialog] = useState(false);
+  const [newClientForm, setNewClientForm] = useState({ name: '', company: '', email: '', phone: '' });
+  const [createClientLoading, setCreateClientLoading] = useState(false);
+  const [createClientError, setCreateClientError] = useState('');
 
   const [formData, setFormData] = useState({
     client_id: initialData?.client_id || '',
@@ -61,6 +67,21 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
 
   const [services, setServices] = useState<any[]>(initialData?.deal_services || []);
 
+  const fetchClients = useCallback(async (bypassCache = false) => {
+    try {
+      const res = await fetch('/api/clients?limit=1000', {
+        cache: bypassCache ? 'no-store' : 'default',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setClients(Array.isArray(data) ? data : (data.data || []));
+      }
+    } catch (err) {
+      console.error('Failed to fetch clients:', err);
+    }
+  }, []);
+
   useEffect(() => {
     // Fetch base commission rate
     const fetchRate = async () => {
@@ -74,19 +95,6 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         }
       } catch (err) {
         console.error('Failed to fetch commission rules:', err);
-      }
-    };
-
-    // Fetch clients
-    const fetchClients = async () => {
-      try {
-        const res = await fetch('/api/clients?limit=1000');
-        if (res.ok) {
-          const data = await res.json();
-          setClients(Array.isArray(data) ? data : (data.data || []));
-        }
-      } catch (err) {
-        console.error('Failed to fetch clients:', err);
       }
     };
 
@@ -120,7 +128,7 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     fetchClients();
     fetchBdrReps();
     checkAdmin();
-  }, []);
+  }, [fetchClients]);
 
   // Recalculate deal value when services change
   useEffect(() => {
@@ -134,13 +142,14 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     service_name: s.service_name,
     service_type: s.service_type,
     billing_type: s.billing_type,
-    unit_price: s.billing_type === 'mrr' || s.billing_type === 'quarterly' ? 0 : (s.unit_price ?? 0),
+    unit_price: s.billing_type === 'mrr' || s.billing_type === 'quarterly' || s.billing_type === 'percentage_of_net_sales' ? 0 : (s.unit_price ?? 0),
     monthly_price: s.billing_type === 'mrr' ? (s.monthly_price ?? null) : null,
     quarterly_price: s.billing_type === 'quarterly' ? (s.quarterly_price ?? null) : null,
     quantity: s.quantity ?? 1,
     contract_months: s.contract_months ?? 12,
     contract_quarters: s.contract_quarters ?? 4,
     commission_rate: s.commission_rate ?? null,
+    billing_percentage: s.billing_type === 'percentage_of_net_sales' ? (s.billing_percentage ?? null) : null,
     completion_date: s.completion_date || null,
     is_renewal: !!(s.is_renewal === true || s.is_renewal === 1),
     original_service_value: (s.is_renewal === true || s.is_renewal === 1) ? (s.original_service_value ?? null) : null,
@@ -148,6 +157,10 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!formData.client_id) {
+      setError('Please select a client. Use the + button to create one if needed.');
+      return;
+    }
     setLoading(true);
     setError('');
 
@@ -182,9 +195,13 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       const savedDealId = dealId || data?.id;
       if (!savedDealId) throw new Error('No deal ID returned');
 
-      // For new deals: create services via API (triggers commission entry creation)
-      if (!dealId && services.length > 0) {
-        for (const service of services) {
+      // Create services via API (triggers commission entry creation / reprocessing)
+      // For new deals: all services; for existing deals: only new ones (tempId)
+      if (services.length > 0) {
+        const servicesToCreate = dealId
+          ? services.filter((s) => typeof s.id === 'string' && s.id.startsWith('temp-'))
+          : services;
+        for (const service of servicesToCreate) {
           const payload = buildServicePayload(service);
           const svcRes = await fetch(`/api/deals/${savedDealId}/services`, {
             method: 'POST',
@@ -199,6 +216,9 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         }
       }
 
+      mutate('/api/dashboard/stats');
+      mutate('/api/dashboard/trend');
+      mutate((key: string) => typeof key === 'string' && key.startsWith('/api/deals'), undefined, { revalidate: true });
       router.push(`/deals/${savedDealId}`);
       router.refresh();
     } catch (err: any) {
@@ -208,68 +228,92 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     }
   };
 
-  const handleAddService = async (serviceData: any) => {
-    if (!dealId) {
-      // For new deals, just add to local state
-      const calc = calculateServiceCommission(
-        serviceData.billing_type,
-        serviceData.unit_price,
-        serviceData.monthly_price || null,
-        serviceData.quarterly_price || null,
-        serviceData.quantity,
-        serviceData.contract_months,
-        serviceData.contract_quarters,
-        serviceData.commission_rate || null,
-        baseCommissionRate
-      );
-      let commissionableValue = calc.commissionable_value;
-      let commissionAmount = calc.commission_amount;
-      const isRenewal = !!serviceData.is_renewal;
-      const originalServiceValue = serviceData.original_service_value ?? null;
-      if (isRenewal && originalServiceValue != null) {
-        const rate = serviceData.commission_rate ?? baseCommissionRate;
-        commissionAmount = Number(calculateRenewalCommission(
-          calc.commissionable_value,
-          originalServiceValue,
-          rate
-        ).toFixed(2));
-      }
-      const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      setServices([...services, {
-        ...serviceData,
-        commissionable_value: commissionableValue,
-        commission_amount: commissionAmount,
-        is_renewal: isRenewal ? 1 : 0,
-        original_service_value: originalServiceValue,
-        id: tempId,
-      }]);
-      setAddingService(false);
+  const handleCreateClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newClientForm.name.trim()) {
+      setCreateClientError('Client name is required');
       return;
     }
-
+    setCreateClientLoading(true);
+    setCreateClientError('');
     try {
-      const res = await fetch(`/api/deals/${dealId}/services`, {
+      const res = await fetch('/api/clients', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify(serviceData),
+        body: JSON.stringify({
+          name: newClientForm.name.trim(),
+          company: newClientForm.company.trim() || null,
+          email: newClientForm.email.trim() || null,
+          phone: newClientForm.phone.trim() || null,
+        }),
       });
-
-      const data = await res.json();
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+      const data = await safeJsonParse(res);
       if (!res.ok || data.error) {
-        throw new Error(data.error || 'Failed to add service');
+        throw new Error(data.error || 'Failed to create client');
       }
-
-      setServices([...services, data]);
-      setAddingService(false);
+      const newClient = { id: data.id, name: data.name, company: data.company ?? undefined };
+      setClients(prev => {
+        if (prev.some(c => c.id === data.id)) return prev;
+        return [...prev, newClient];
+      });
+      setFormData(prev => ({
+        ...prev,
+        client_id: data.id,
+        client_name: data.name,
+      }));
+      await fetchClients(true);
+      setNewClientForm({ name: '', company: '', email: '', phone: '' });
+      setShowCreateClientDialog(false);
     } catch (err: any) {
-      setError(err.message || 'Failed to add service');
+      setCreateClientError(err.message || 'Failed to create client');
+    } finally {
+      setCreateClientLoading(false);
     }
   };
 
+  const handleAddService = async (serviceData: any) => {
+    // Add to local state for both new and existing deals - saved when user clicks Update Deal / Create Deal
+    const calc = calculateServiceCommission(
+      serviceData.billing_type,
+      serviceData.unit_price ?? 0,
+      serviceData.monthly_price || null,
+      serviceData.quarterly_price || null,
+      serviceData.quantity ?? 1,
+      serviceData.contract_months ?? 12,
+      serviceData.contract_quarters ?? 4,
+      serviceData.commission_rate || null,
+      baseCommissionRate
+    );
+    let commissionableValue = calc.commissionable_value;
+    let commissionAmount = calc.commission_amount;
+    const isRenewal = !!serviceData.is_renewal;
+    const originalServiceValue = serviceData.original_service_value ?? null;
+    if (isRenewal && originalServiceValue != null) {
+      const rate = serviceData.commission_rate ?? baseCommissionRate;
+      commissionAmount = Number(calculateRenewalCommission(
+        calc.commissionable_value,
+        originalServiceValue,
+        rate
+      ).toFixed(2));
+    }
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    setServices([...services, {
+      ...serviceData,
+      commissionable_value: commissionableValue,
+      commission_amount: commissionAmount,
+      is_renewal: isRenewal ? 1 : 0,
+      original_service_value: originalServiceValue,
+      id: tempId,
+    }]);
+    setAddingService(false);
+  };
+
   const handleUpdateService = async (serviceData: any) => {
-    if (!dealId || !serviceData.id) {
-      // For new deals, update in local state and recalculate commission
+    const isTempService = typeof serviceData.id === 'string' && serviceData.id.startsWith('temp-');
+    if (!dealId || !serviceData.id || isTempService) {
+      // For new deals or temp services (not yet saved), update in local state and recalculate commission
       const calc = calculateServiceCommission(
         serviceData.billing_type,
         serviceData.unit_price,
@@ -321,6 +365,8 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
 
       setServices(services.map(s => s.id === serviceData.id ? data : s));
       setEditingServiceId(null);
+      mutate('/api/dashboard/stats');
+      mutate('/api/dashboard/trend');
     } catch (err: any) {
       setError(err.message || 'Failed to update service');
     } finally {
@@ -333,8 +379,9 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       return;
     }
 
-    if (!dealId) {
-      // For new deals, just remove from local state
+    const isTempService = typeof serviceId === 'string' && serviceId.startsWith('temp-');
+    if (!dealId || isTempService) {
+      // For new deals or temp services (not yet saved), just remove from local state
       setServices(services.filter(s => s.id !== serviceId));
       return;
     }
@@ -351,6 +398,8 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       }
 
       setServices(services.filter(s => s.id !== serviceId));
+      mutate('/api/dashboard/stats');
+      mutate('/api/dashboard/trend');
     } catch (err: any) {
       setError(err.message || 'Failed to delete service');
     }
@@ -371,6 +420,7 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       case 'mrr': return 'Monthly Recurring Revenue (MRR)';
       case 'quarterly': return 'Recurring Quarterly';
       case 'deposit': return 'Deposit-Based Billing (50% / 50%)';
+      case 'paid_on_completion': return 'Paid on Completion';
       default: return type;
     }
   };
@@ -391,41 +441,24 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         </CardHeader>
         <CardContent className="space-y-4">
           <div>
-            <Label htmlFor="client_name">Client Name *</Label>
-            <Input
-              id="client_name"
-              value={formData.client_name}
-              onChange={(e) => setFormData({ ...formData, client_name: e.target.value })}
-              required
-            />
-          </div>
-
-          {clients.length > 0 && (
-            <div>
-              <Label htmlFor="client_id">Link to Client (optional)</Label>
+            <Label htmlFor="client_id">Client *</Label>
+            <div className="flex gap-2">
               <Select
-                value={formData.client_id || 'none'}
+                value={formData.client_id || ''}
                 onValueChange={(value) => {
-                  if (value === 'none') {
-                    setFormData({
-                      ...formData,
-                      client_id: '',
-                    });
-                  } else {
-                    const client = clients.find(c => c.id === value);
-                    setFormData({
-                      ...formData,
-                      client_id: value,
-                      client_name: client?.name || formData.client_name,
-                    });
-                  }
+                  const client = clients.find(c => c.id === value);
+                  setFormData({
+                    ...formData,
+                    client_id: value,
+                    client_name: client?.name || formData.client_name,
+                  });
                 }}
+                required
               >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a client" />
+                <SelectTrigger className="flex-1">
+                  <SelectValue placeholder={clients.length === 0 ? 'No clients yet — click + to add' : 'Select a client'} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
                   {clients.map((client) => (
                     <SelectItem key={client.id} value={client.id}>
                       {client.name} {client.company && `(${client.company})`}
@@ -433,8 +466,86 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
                   ))}
                 </SelectContent>
               </Select>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => setShowCreateClientDialog(true)}
+                title="Add new client"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
             </div>
-          )}
+          </div>
+
+          <Dialog open={showCreateClientDialog} onOpenChange={setShowCreateClientDialog}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add New Client</DialogTitle>
+              </DialogHeader>
+              <form onSubmit={handleCreateClient} className="space-y-4">
+                {createClientError && (
+                  <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded text-sm">
+                    {createClientError}
+                  </div>
+                )}
+                <div>
+                  <Label htmlFor="new_client_name">Name *</Label>
+                  <Input
+                    id="new_client_name"
+                    value={newClientForm.name}
+                    onChange={(e) => setNewClientForm(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="Client name"
+                    required
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="new_client_company">Company</Label>
+                  <Input
+                    id="new_client_company"
+                    value={newClientForm.company}
+                    onChange={(e) => setNewClientForm(prev => ({ ...prev, company: e.target.value }))}
+                    placeholder="Company"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="new_client_email">Email</Label>
+                  <Input
+                    id="new_client_email"
+                    type="email"
+                    value={newClientForm.email}
+                    onChange={(e) => setNewClientForm(prev => ({ ...prev, email: e.target.value }))}
+                    placeholder="email@example.com"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="new_client_phone">Phone</Label>
+                  <Input
+                    id="new_client_phone"
+                    value={newClientForm.phone}
+                    onChange={(e) => setNewClientForm(prev => ({ ...prev, phone: e.target.value }))}
+                    placeholder="Phone"
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setShowCreateClientDialog(false);
+                      setCreateClientError('');
+                      setNewClientForm({ name: '', company: '', email: '', phone: '' });
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={createClientLoading}>
+                    {createClientLoading ? 'Creating...' : 'Create Client'}
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
 
           {isAdmin && bdrReps.length > 0 && (
             <div>
@@ -613,7 +724,13 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
         </CardContent>
       </Card>
 
-      <Button type="submit" disabled={loading} className="w-full">
+      {services.some((s) => typeof s.id === 'string' && s.id.startsWith('temp-')) && (
+        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+          You have unsaved services. Click {dealId ? 'Update Deal' : 'Create Deal'} below to save and generate commission entries.
+        </p>
+      )}
+
+      <Button type="submit" disabled={loading || !formData.client_id} className="w-full">
         {loading ? 'Saving...' : dealId ? 'Update Deal' : 'Create Deal'}
       </Button>
       </form>
@@ -729,10 +846,16 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
                       </div>
                     </>
                   )}
-                  {(service.billing_type === 'one_off' || service.billing_type === 'deposit') && (
+                  {(service.billing_type === 'one_off' || service.billing_type === 'deposit' || service.billing_type === 'paid_on_completion') && (
                     <div>
                       <span className="text-gray-600">Unit Price:</span>
                       <p className="font-medium">{formatCurrency(service.unit_price)}</p>
+                    </div>
+                  )}
+                  {service.billing_type === 'paid_on_completion' && service.completion_date && (
+                    <div>
+                      <span className="text-gray-600">Estimated Completion:</span>
+                      <p className="font-medium">{service.completion_date}</p>
                     </div>
                   )}
                   <div>

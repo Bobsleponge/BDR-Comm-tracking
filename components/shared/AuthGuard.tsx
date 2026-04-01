@@ -1,6 +1,6 @@
 'use client';
 
-import { useRouter, usePathname } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import useSWR from 'swr';
@@ -17,7 +17,6 @@ const fetcher = async (url: string) => {
 };
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
   
   // Use SWR for fast, cached auth check - non-blocking
@@ -33,9 +32,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   // Redirect to login if not authenticated (but not if already on login page)
   useEffect(() => {
     if (!loading && !authenticated && pathname !== '/login') {
-      router.push('/login');
+      // Use window.location for reliable redirect (avoids client-side nav issues)
+      window.location.href = '/login';
     }
-  }, [loading, authenticated, pathname, router]);
+  }, [loading, authenticated, pathname]);
 
   if (loading) {
     return (
@@ -49,7 +49,15 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   }
 
   if (!authenticated) {
-    return null;
+    // Show redirecting message instead of blank screen while router.push runs
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="text-center space-y-4">
+          <div className="animate-pulse h-8 w-48 bg-muted rounded mx-auto" />
+          <p className="text-sm text-muted-foreground">Redirecting to sign in...</p>
+        </div>
+      </div>
+    );
   }
 
   return <>{children}</>;

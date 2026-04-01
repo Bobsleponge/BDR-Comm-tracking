@@ -110,14 +110,49 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     await requireAuth();
-    const supabase = await createClient();
     const body = await request.json();
 
     const validated = clientSchema.parse(body);
 
+    if (USE_LOCAL_DB) {
+      const { getLocalDB } = await import('@/lib/db/local-db');
+      const { generateUUID } = await import('@/lib/utils/uuid');
+      const db = getLocalDB();
+
+      const id = generateUUID();
+      const now = new Date().toISOString();
+
+      db.prepare(`
+        INSERT INTO clients (id, name, company, email, phone, address, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        validated.name,
+        validated.company ?? null,
+        validated.email ?? null,
+        validated.phone ?? null,
+        validated.address ?? null,
+        validated.notes ?? null,
+        now,
+        now
+      );
+
+      const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(id) as any;
+      return apiSuccess(client, 201);
+    }
+
+    const supabase = await createClient();
+    const insertRow = {
+      name: validated.name,
+      company: validated.company ?? null,
+      email: validated.email ?? null,
+      phone: validated.phone ?? null,
+      address: validated.address ?? null,
+      notes: validated.notes ?? null,
+    };
     const result = await (supabase
       .from('clients')
-      .insert(validated)
+      .insert(insertRow)
       .select()
       .single() as any);
     const { data, error } = result as { data: any; error: any };
@@ -128,8 +163,12 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess(data, 201);
   } catch (error: any) {
-    if (error.name === 'ZodError') {
-      return apiError(`Validation error: ${error.errors.map((e: any) => e.message).join(', ')}`, 400);
+    if (error?.name === 'ZodError') {
+      const issues = error.issues ?? error.errors ?? [];
+      return apiError(
+        `Validation error: ${issues.map((e: { message: string }) => e.message).join(', ')}`,
+        400
+      );
     }
     return apiError(error.message, 401);
   }

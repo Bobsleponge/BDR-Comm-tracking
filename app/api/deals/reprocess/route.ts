@@ -30,6 +30,18 @@ export async function POST(request: NextRequest) {
         return apiError('Deal not found', 404);
       }
 
+      // Do not reprocess if any commission entries are in approved/paid batches (prevents duplicate commissions)
+      const inApprovedBatch = db.prepare(`
+        SELECT 1 FROM commission_entries ce
+        JOIN commission_batch_items cbi ON cbi.commission_entry_id = ce.id
+        JOIN commission_batches cb ON cbi.batch_id = cb.id
+        WHERE ce.deal_id = ? AND cb.status IN ('approved', 'paid')
+        LIMIT 1
+      `).get(dealId) as { '1': number } | undefined;
+      if (inApprovedBatch) {
+        return apiError('Deal has entries in an approved/paid report; reprocessing would create duplicates', 400);
+      }
+
       // Delete existing revenue events and commission entries (prevents duplicates)
       db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
       db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
@@ -68,6 +80,21 @@ export async function POST(request: NextRequest) {
 
     if (dealError || !deal) {
       return apiError('Deal not found', 404);
+    }
+
+    // Do not reprocess if any commission entries are in approved/paid batches
+    const { data: dealEntries } = await (supabase as any).from('commission_entries').select('id').eq('deal_id', dealId);
+    if (dealEntries?.length) {
+      const entryIds = dealEntries.map((e: any) => e.id);
+      const { data: cbiRows } = await (supabase as any).from('commission_batch_items').select('batch_id').in('commission_entry_id', entryIds);
+      const batchIds = [...new Set((cbiRows || []).map((r: any) => r.batch_id))];
+      if (batchIds.length > 0) {
+        const { data: batchStatuses } = await (supabase as any).from('commission_batches').select('status').in('id', batchIds);
+        const hasApproved = (batchStatuses || []).some((b: any) => ['approved', 'paid'].includes(b.status));
+        if (hasApproved) {
+          return apiError('Deal has entries in an approved/paid report; reprocessing would create duplicates', 400);
+        }
+      }
     }
 
     // Delete existing revenue events and commission entries (prevents duplicates)

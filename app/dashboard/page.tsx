@@ -3,9 +3,12 @@
 import { AuthGuard } from '@/components/shared/AuthGuard';
 import { Layout } from '@/components/shared/Layout';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
-import { DashboardStats } from '@/components/dashboard/DashboardStats';
+import { DashboardHeroKPIs } from '@/components/dashboard/DashboardHeroKPIs';
+import { DashboardStatsGrid } from '@/components/dashboard/DashboardStatsGrid';
+import { ProjectedCommissionByQuarter } from '@/components/dashboard/ProjectedCommissionByQuarter';
 import { RecentDealsTable } from '@/components/dashboard/RecentDealsTable';
 import { TargetProgressChart } from '@/components/dashboard/TargetProgressChart';
+import { RevenueTrendChart } from '@/components/dashboard/RevenueTrendChart';
 import Link from 'next/link';
 import { getQuarterFromDate } from '@/lib/commission/calculator';
 import useSWR from 'swr';
@@ -19,12 +22,16 @@ interface DashboardStats {
   commissionPending: number;
   quarterlyProgress: {
     revenueCollected: number;
+    newBusinessCollected?: number;
+    renewalUpliftCollected?: number;
     achievedPercent: number;
     bonusEligible: boolean;
     target: number;
   };
   annualProgress?: {
     revenueCollected: number;
+    newBusinessCollected?: number;
+    renewalUpliftCollected?: number;
     target: number;
     achievedPercent: number;
     daysElapsed: number;
@@ -32,12 +39,23 @@ interface DashboardStats {
   };
   bhagProgress?: {
     revenueCollected: number;
+    newBusinessCollected?: number;
+    renewalUpliftCollected?: number;
     target: number;
     achievedPercent: number;
     daysElapsed: number;
     daysRemaining: number;
   };
-  nextMonthPayout: number;
+  nextMonthPayout?: number;
+  quarterlyCommissionOnClosedDeals?: number;
+  quarterlyCommissionBaseAmount?: number;
+  projectedCommissionByQuarter?: Record<string, number>;
+  quarterlyProgressByQuarter?: Record<string, { revenue: number; commission: number; bonus: number; target: number; achievedPercent: number }>;
+  commissionAccruedThisMonth?: number;
+  expectedBonusOnSignedDeals?: number;
+  expectedBonusOnCashCollected?: number;
+  projectedQuarterlyBonus?: number;
+  ytdPayableRevenue?: number;
 }
 
 interface Deal {
@@ -68,9 +86,9 @@ const fetcher = async (url: string) => {
 export default function DashboardPage() {
   // Use SWR for data fetching with automatic caching and revalidation
   const { data: stats, error: statsError } = useSWR<DashboardStats>('/api/dashboard/stats', fetcher, {
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false, // Don't auto-refetch on reconnect
-    dedupingInterval: 60000, // Increased to 60 seconds
+    revalidateOnFocus: true, // Refetch when tab regains focus (gets fresh bonus data)
+    revalidateOnReconnect: true,
+    dedupingInterval: 2000, // Allow refetch every 2s so numbers update when deals change
     onError: (error) => {
       console.error('Dashboard stats error:', error);
     },
@@ -79,6 +97,11 @@ export default function DashboardPage() {
   const { data: dealsRaw, error: dealsError } = useSWR<any>('/api/deals?status=closed-won&limit=5', fetcher, {
     revalidateOnFocus: false,
     revalidateOnReconnect: false,
+    dedupingInterval: 60000,
+  });
+
+  const { data: trendData } = useSWR<Array<{ month: string; amount: number }>>('/api/dashboard/trend', fetcher, {
+    revalidateOnFocus: false,
     dedupingInterval: 60000,
   });
   
@@ -100,7 +123,7 @@ export default function DashboardPage() {
               <Skeleton className="h-10 w-24" />
             </div>
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-              {[1, 2, 3, 4].map((i) => (
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
                 <Skeleton key={i} className="h-32" />
               ))}
             </div>
@@ -136,23 +159,50 @@ export default function DashboardPage() {
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-6 flex justify-between items-center">
             <h2 className="text-2xl font-bold">Dashboard</h2>
-            <Link href="/deals/new">
-              <Button>New Deal</Button>
-            </Link>
+            <div className="flex gap-2">
+              <Link href="/commission/preview">
+                <Button variant="outline">Commission Preview</Button>
+              </Link>
+              <Link href="/deals/new">
+                <Button>New Deal</Button>
+              </Link>
+            </div>
           </div>
 
           {stats && (
             <>
+              {/* 1. Hero KPI Row */}
               <div className="mb-6">
-                <DashboardStats
-                  closedDeals={stats.closedDeals ?? 0}
-                  commissionEarned={stats.commissionEarned ?? 0}
-                  commissionPending={stats.commissionPending ?? 0}
-                  nextMonthPayout={stats.nextMonthPayout ?? 0}
+                <DashboardHeroKPIs
+                  quarterlyCashCollected={stats.quarterlyProgress?.revenueCollected ?? 0}
+                  quarterlyCommissionOnClosedDeals={stats.quarterlyCommissionOnClosedDeals ?? 0}
+                  quarterlyCommissionBaseAmount={stats.quarterlyCommissionBaseAmount ?? 0}
+                  projectedQuarterlyBonus={
+                    stats.projectedQuarterlyBonus ??
+                    stats.quarterlyProgressByQuarter?.[currentQuarter]?.bonus ??
+                    0
+                  }
+                  expectedBonusOnCollectedCashToDate={
+                    stats.expectedBonusOnCashCollected ??
+                    stats.quarterlyProgressByQuarter?.[currentQuarter]?.bonus ??
+                    stats.projectedQuarterlyBonus ??
+                    0
+                  }
+                  ytdPayableRevenue={stats.ytdPayableRevenue ?? stats.annualProgress?.revenueCollected ?? 0}
+                  currentQuarter={currentQuarter}
                 />
               </div>
 
-              {/* Target Progress Overview Chart - Circular Indicators Only */}
+              {/* 2. Quarterly Goal Progress (Cash Collected) */}
+              <div className="mb-6">
+                <ProjectedCommissionByQuarter
+                  quarterlyProgressByQuarter={stats.quarterlyProgressByQuarter}
+                  projectedCommissionByQuarter={stats.projectedCommissionByQuarter}
+                  currentQuarter={currentQuarter}
+                />
+              </div>
+
+              {/* 3. Target Progress Overview */}
               {stats.quarterlyProgress && (
                 <div className="mb-6">
                   <TargetProgressChart
@@ -161,25 +211,51 @@ export default function DashboardPage() {
                       revenueCollected: stats.quarterlyProgress.revenueCollected ?? 0,
                       target: stats.quarterlyProgress.target ?? 75000,
                       achievedPercent: stats.quarterlyProgress.achievedPercent ?? 0,
+                      newBusinessCollected: stats.quarterlyProgress.newBusinessCollected,
+                      renewalUpliftCollected: stats.quarterlyProgress.renewalUpliftCollected,
                     }}
                     annual={stats.annualProgress ? {
                       title: 'Annual Target ($250k)',
                       revenueCollected: stats.annualProgress.revenueCollected ?? 0,
                       target: stats.annualProgress.target ?? 250000,
                       achievedPercent: stats.annualProgress.achievedPercent ?? 0,
+                      newBusinessCollected: stats.annualProgress.newBusinessCollected,
+                      renewalUpliftCollected: stats.annualProgress.renewalUpliftCollected,
+                      daysElapsed: stats.annualProgress.daysElapsed,
+                      daysRemaining: stats.annualProgress.daysRemaining,
                     } : undefined}
                     bhag={stats.bhagProgress ? {
                       title: 'BHAG ($800k)',
                       revenueCollected: stats.bhagProgress.revenueCollected ?? 0,
                       target: stats.bhagProgress.target ?? 800000,
                       achievedPercent: stats.bhagProgress.achievedPercent ?? 0,
+                      newBusinessCollected: stats.bhagProgress.newBusinessCollected,
+                      renewalUpliftCollected: stats.bhagProgress.renewalUpliftCollected,
+                      daysElapsed: stats.bhagProgress.daysElapsed,
+                      daysRemaining: stats.bhagProgress.daysRemaining,
                     } : undefined}
                   />
                 </div>
               )}
 
+              {/* 4. Revenue Trend Chart */}
               <div className="mb-6">
-                <RecentDealsTable deals={displayDeals} />
+                <RevenueTrendChart data={trendData ?? []} />
+              </div>
+
+              {/* 5. Secondary Stats Grid */}
+              <div className="mb-6">
+                <DashboardStatsGrid
+                  closedDeals={stats.closedDeals ?? 0}
+                  commissionEarned={stats.commissionEarned ?? 0}
+                  commissionPending={stats.commissionPending ?? 0}
+                  commissionAccruedThisMonth={stats.commissionAccruedThisMonth ?? 0}
+                />
+              </div>
+
+              {/* 6. Recent Deals */}
+              <div className="mb-6">
+                <RecentDealsTable deals={displayDeals} viewAllHref="/deals?status=closed-won" />
               </div>
             </>
           )}

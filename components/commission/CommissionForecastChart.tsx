@@ -20,7 +20,7 @@ export function CommissionForecastChart({ data }: CommissionForecastChartProps) 
 
   return (
     <div className="bg-white shadow rounded-lg p-6">
-      <h3 className="text-lg font-medium text-gray-900 mb-4">12-Month Commission Forecast</h3>
+      <h3 className="text-lg font-medium text-gray-900 mb-4">Commission Forecast</h3>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" />

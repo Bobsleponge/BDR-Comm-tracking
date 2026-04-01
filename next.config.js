@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Allow loading from local network IP when accessing from another device
+  allowedDevOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.101.252:3000', 'http://192.168.101.254:3000'],
+  // Disable dev indicators to reduce segment-explorer / manifest race conditions (see .cursor/NEXT_CACHE_INVESTIGATION.md)
+  devIndicators: false,
   // Enable experimental features for better performance
   experimental: {
     optimizePackageImports: ['recharts', 'date-fns', 'lucide-react'],
@@ -25,9 +29,9 @@ const nextConfig = {
   // Add output configuration for better performance
   // Only use standalone in production builds, not in dev mode
   ...(process.env.NODE_ENV === 'production' ? { output: 'standalone' } : {}), // Reduces bundle size
-  // Optimize bundle splitting
-  webpack: (config, { isServer }) => {
-    if (!isServer) {
+  // Optimize bundle splitting (only in production - dev full rebuilds can corrupt .next cache)
+  webpack: (config, { isServer, dev }) => {
+    if (!isServer && !dev) {
       config.optimization = {
         ...config.optimization,
         splitChunks: {

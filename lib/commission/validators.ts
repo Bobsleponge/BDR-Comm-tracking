@@ -77,16 +77,22 @@ export const dealSchema = z.object({
  */
 export const dealUpdateSchema = dealSchema.partial();
 
+/** Coerce "" / undefined to null so optional email/company fields never fail validation */
+const emptyToNull = (val: unknown) => (val === '' || val === undefined ? null : val);
+
 /**
  * Schema for validating client data
  */
 export const clientSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  company: z.string().nullable().optional(),
-  email: z.string().email('Invalid email address').nullable().optional(),
-  phone: z.string().nullable().optional(),
-  address: z.string().nullable().optional(),
-  notes: z.string().nullable().optional(),
+  name: z.string().trim().min(1, 'Name is required'),
+  company: z.preprocess(emptyToNull, z.string().nullable().optional()),
+  email: z.preprocess(
+    emptyToNull,
+    z.union([z.string().email('Invalid email address'), z.null()]).optional()
+  ),
+  phone: z.preprocess(emptyToNull, z.string().nullable().optional()),
+  address: z.preprocess(emptyToNull, z.string().nullable().optional()),
+  notes: z.preprocess(emptyToNull, z.string().nullable().optional()),
 });
 
 /**
@@ -125,14 +131,15 @@ const dealServiceBaseSchema = z.object({
   id: z.string().uuid().optional(),
   service_name: z.string().min(1, 'Service name is required'),
   service_type: z.string().min(1, 'Service type is required'),
-  billing_type: z.enum(['one_off', 'mrr', 'deposit', 'quarterly']),
-  unit_price: z.number().min(0, 'Unit price must be positive'),
+  billing_type: z.enum(['one_off', 'mrr', 'deposit', 'quarterly', 'paid_on_completion', 'percentage_of_net_sales']),
+  unit_price: z.number().min(0, 'Unit price must be non-negative'),
   monthly_price: z.number().min(0).nullable().optional(),
   quarterly_price: z.number().min(0).nullable().optional(),
   quantity: z.number().int().positive().default(1),
   contract_months: z.number().int().positive().default(12),
   contract_quarters: z.number().int().positive().default(4),
   commission_rate: z.number().min(0).max(1).nullable().optional(),
+  billing_percentage: z.number().min(0).max(1).nullable().optional(),
   completion_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format').nullable().optional(),
   is_renewal: z.boolean().optional(),
   original_service_value: z.number().min(0).nullable().optional(),
@@ -159,6 +166,24 @@ export const dealServiceSchema = dealServiceBaseSchema.refine((data) => {
 }, {
   message: 'Quarterly price is required for quarterly billing type',
   path: ['quarterly_price'],
+}).refine((data) => {
+  // Paid on completion requires completion_date
+  if (data.billing_type === 'paid_on_completion' && !data.completion_date) {
+    return false;
+  }
+  return true;
+}, {
+  message: 'Estimated completion date is required for Paid on Completion billing type',
+  path: ['completion_date'],
+}).refine((data) => {
+  // Percentage of net sales requires billing_percentage
+  if (data.billing_type === 'percentage_of_net_sales') {
+    return data.billing_percentage != null && data.billing_percentage > 0 && data.billing_percentage <= 1;
+  }
+  return true;
+}, {
+  message: 'Billing percentage (0-100%) is required for Percentage of Net Sales billing type',
+  path: ['billing_percentage'],
 });
 
 /**

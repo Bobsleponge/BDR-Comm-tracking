@@ -48,6 +48,17 @@ async function updateDealValue(dealId: string) {
   }
 }
 
+async function setDealFirstInvoiceDate(dealId: string, firstInvoiceDate: string) {
+  if (USE_LOCAL_DB) {
+    const { getLocalDB } = await import('@/lib/db/local-db');
+    const db = getLocalDB();
+    db.prepare('UPDATE deals SET first_invoice_date = ?, updated_at = datetime(\'now\') WHERE id = ?').run(firstInvoiceDate, dealId);
+  } else {
+    const supabase = await createClient();
+    await (supabase as any).from('deals').update({ first_invoice_date: firstInvoiceDate }).eq('id', dealId);
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -118,10 +129,10 @@ export async function POST(
         INSERT INTO deal_services (
           id, deal_id, service_name, service_type, billing_type, unit_price, monthly_price,
           quarterly_price, quantity, contract_months, contract_quarters,
-          commission_rate, commissionable_value, commission_amount, completion_date,
+          commission_rate, billing_percentage, commissionable_value, commission_amount, completion_date,
           is_renewal, original_service_value,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         serviceId,
         dealId,
@@ -135,6 +146,7 @@ export async function POST(
         serviceData.contract_months ?? 12,
         serviceData.contract_quarters ?? 4,
         toBind(serviceData.commission_rate),
+        toBind(serviceData.billing_percentage),
         commissionableValue,
         commissionAmount,
         toBind(serviceData.completion_date),
@@ -147,18 +159,31 @@ export async function POST(
       // Update deal value
       await updateDealValue(dealId);
 
+      // For paid_on_completion: set first_invoice_date = expected completion date (scheduled payment)
+      if (serviceData.billing_type === 'paid_on_completion' && serviceData.completion_date) {
+        const dateStr = typeof serviceData.completion_date === 'string'
+          ? serviceData.completion_date.split('T')[0]
+          : serviceData.completion_date;
+        await setDealFirstInvoiceDate(dealId, dateStr);
+      }
+
       // Reprocess deal so revenue events and commission entries include the new service
       const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
       db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
       db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
       await createRevenueEventsForDeal(dealId);
       const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(dealId) as Array<{ id: string }>;
+      const processErrors: string[] = [];
       for (const ev of revenueEvents) {
         try {
           await processRevenueEvent(ev.id);
-        } catch {
-          // Ignore individual processing errors
+        } catch (err) {
+          processErrors.push((err as Error).message);
+          console.error(`[services POST] Failed to process revenue event ${ev.id}:`, err);
         }
+      }
+      if (processErrors.length > 0) {
+        console.error(`[services POST] ${processErrors.length} commission entry/entries failed for deal ${dealId}:`, processErrors);
       }
 
       const newService = db.prepare('SELECT * FROM deal_services WHERE id = ?').get(serviceId) as any;
@@ -182,11 +207,12 @@ export async function POST(
       return apiError('Forbidden', 403);
     }
 
-    // Calculate commission - for renewals use uplift
+    // Calculate commission - for renewals use uplift; percentage_of_net_sales uses 0
     const baseRate = await getBaseCommissionRate();
+    const unitPrice = serviceData.billing_type === 'percentage_of_net_sales' ? 0 : serviceData.unit_price;
     const commission = calculateServiceCommission(
       serviceData.billing_type,
-      serviceData.unit_price,
+      unitPrice,
       serviceData.monthly_price || null,
       serviceData.quarterly_price || null,
       serviceData.quantity,
@@ -214,13 +240,14 @@ export async function POST(
       service_name: serviceData.service_name,
       service_type: serviceData.service_type,
       billing_type: serviceData.billing_type,
-      unit_price: serviceData.unit_price,
+      unit_price: unitPrice,
       monthly_price: serviceData.monthly_price || null,
       quarterly_price: serviceData.quarterly_price || null,
       quantity: serviceData.quantity,
       contract_months: serviceData.contract_months,
       contract_quarters: serviceData.contract_quarters,
       commission_rate: serviceData.commission_rate || null,
+      billing_percentage: serviceData.billing_percentage ?? null,
       commissionable_value: commissionableValue,
       commission_amount: commissionAmount,
       completion_date: serviceData.completion_date || null,
@@ -243,6 +270,14 @@ export async function POST(
     // Update deal value
     await updateDealValue(dealId);
 
+    // For paid_on_completion: set first_invoice_date = expected completion date (scheduled payment)
+    if (serviceData.billing_type === 'paid_on_completion' && serviceData.completion_date) {
+      const dateStr = typeof serviceData.completion_date === 'string'
+        ? serviceData.completion_date.split('T')[0]
+        : serviceData.completion_date;
+      await setDealFirstInvoiceDate(dealId, dateStr);
+    }
+
     // Reprocess deal so revenue events and commission entries include the new service
     const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
     await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
@@ -250,12 +285,17 @@ export async function POST(
     await createRevenueEventsForDeal(dealId);
     const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', dealId);
     const revenueEvents = eventsResult.data || [];
+    const processErrors: string[] = [];
     for (const ev of revenueEvents) {
       try {
         await processRevenueEvent(ev.id);
-      } catch {
-        // Ignore individual processing errors
+      } catch (err) {
+        processErrors.push((err as Error).message);
+        console.error(`[services POST] Failed to process revenue event ${ev.id}:`, err);
       }
+    }
+    if (processErrors.length > 0) {
+      console.error(`[services POST] ${processErrors.length} commission entry/entries failed for deal ${dealId}:`, processErrors);
     }
 
     return apiSuccess(newService, 201);

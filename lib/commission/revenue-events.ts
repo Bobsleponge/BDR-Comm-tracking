@@ -2,7 +2,7 @@ import 'server-only';
 
 import { createClient } from '@/lib/supabase/server';
 import { generateUUID } from '@/lib/utils/uuid';
-import { parseISO, addDays, format } from 'date-fns';
+import { parseISO, addDays, addMonths, startOfMonth, format } from 'date-fns';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -43,6 +43,7 @@ export async function createRevenueEvent(
   }
 
   const supabase = await createClient() as any;
+  const collectionDateStr = format(collectionDate, 'yyyy-MM-dd');
   const result = await supabase
     .from('revenue_events')
     .insert({
@@ -50,7 +51,7 @@ export async function createRevenueEvent(
       service_id: serviceId,
       bdr_id: bdrId,
       amount_collected: amountCollected,
-      collection_date: collectionDate.toISOString().split('T')[0],
+      collection_date: collectionDateStr,
       billing_type: billingType,
       payment_stage: paymentStage,
       commissionable,
@@ -101,22 +102,26 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
       throw new Error('Commission rules not found');
     }
 
-    // Calculate commission amount
-    const commissionRate = rules.base_rate || 0.025;
+    // Check if this is a deposit service - first 50% uses first_invoice_date, second 50% uses completion_date (collection_date)
+    const service = event.service_id 
+      ? db.prepare('SELECT * FROM deal_services WHERE id = ?').get(event.service_id) as any
+      : null;
+    const commissionRate = rules.base_rate || 0.025; // 2.5% for all including renewals (uplift)
     const commissionAmount = event.amount_collected * commissionRate;
 
     // Get payout delay days
     const payoutDelayDays = rules.payout_delay_days || 30;
 
-    // Check if this is a deposit service - first 50% uses first_invoice_date, second 50% uses completion_date (collection_date)
     let accrualDate: string;
-    const service = event.service_id 
-      ? db.prepare('SELECT * FROM deal_services WHERE id = ?').get(event.service_id) as any
-      : null;
     const isDeposit = service?.billing_type === 'deposit';
     
     let isDepositSecondHalf = false;
-    if (isDeposit && deal.first_invoice_date && service?.completion_date) {
+    // For paid_on_completion: accrual = completion date (collection_date), normalized to YYYY-MM-DD
+    if (service?.billing_type === 'paid_on_completion') {
+      accrualDate = typeof event.collection_date === 'string'
+        ? event.collection_date.split('T')[0]
+        : format(new Date(event.collection_date), 'yyyy-MM-dd');
+    } else if (isDeposit && deal.first_invoice_date && service?.completion_date) {
       const completionDateStr = typeof service.completion_date === 'string' 
         ? service.completion_date.split('T')[0] 
         : format(new Date(service.completion_date), 'yyyy-MM-dd');
@@ -141,7 +146,7 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     // Calculate payable_date:
     // - Deposit second 50%: payable on completion date (no delay)
     // - First payment (one-off, renewal, first MRR/quarterly): payable on first_invoice_date (no delay)
-    // - MRR subsequent: 30-day cadence from first claim - payable = first_invoice_date + (index * 30)
+    // - MRR subsequent: monthly cadence from first claim - payable = first_invoice_date + N calendar months
     // - Quarterly subsequent: 90-day cadence - payable = first_invoice_date + (index * 90)
     const firstInvoiceDateStr = deal.first_invoice_date
       ? (typeof deal.first_invoice_date === 'string' ? deal.first_invoice_date.split('T')[0] : format(new Date(deal.first_invoice_date), 'yyyy-MM-dd'))
@@ -150,14 +155,19 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
 
     let payableDate: string;
     const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
-    // Renewals: full commission payable 7 days after close (existing business, not broken up)
-    if (revBilling === 'renewal') {
+    // Paid on completion: commission payable 7 days after completion date (funds processing time)
+    // Deposit second 50%: same 7-day delay (work billed by month-end, funds need time to process)
+    if (service?.billing_type === 'paid_on_completion') {
+      payableDate = format(addDays(parseISO(accrualDate), 7), 'yyyy-MM-dd');
+    } else if (isDepositSecondHalf) {
+      payableDate = format(addDays(parseISO(accrualDate), 7), 'yyyy-MM-dd');
+    } else if (revBilling === 'renewal') {
       payableDate = accrualDate;
-    } else if (isDepositSecondHalf || isFirstPayment) {
+    } else if (isFirstPayment) {
       payableDate = accrualDate;
     } else {
       if ((revBilling === 'monthly' || revBilling === 'mrr') && firstInvoiceDateStr) {
-        // MRR: 30-day cadence from first claim (Jan 7, Feb 6, Mar 8, Apr 7...)
+        // MRR: calendar-month cadence from first claim (exactly one MRR payment per month)
         const sameDealService = db.prepare(`
           SELECT id, collection_date FROM revenue_events 
           WHERE deal_id = ? AND service_id = ? AND commissionable = 1 
@@ -166,7 +176,7 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
         const paymentIndex = sameDealService.findIndex((r: any) => r.id === eventId);
         const index = paymentIndex >= 0 ? paymentIndex : 0;
         const firstInvoiceObj = parseISO(firstInvoiceDateStr);
-        payableDate = format(addDays(firstInvoiceObj, index * payoutDelayDays), 'yyyy-MM-dd');
+        payableDate = format(addMonths(firstInvoiceObj, index), 'yyyy-MM-dd');
       } else if ((revBilling === 'quarterly') && firstInvoiceDateStr) {
         // Quarterly: 90-day cadence from first claim
         const sameDealService = db.prepare(`
@@ -184,19 +194,19 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
       }
     }
 
-    // Create commission entry
+    // Create commission entry (include service_id for UNIQUE constraint: deal_id+month+service_id)
     const entryId = generateUUID();
     const month = accrualDate; // Month for BDR allocation
     const now = new Date().toISOString();
 
     db.prepare(`
       INSERT INTO commission_entries (
-        id, deal_id, bdr_id, revenue_event_id, month,
+        id, deal_id, bdr_id, revenue_event_id, service_id, month,
         accrual_date, payable_date, amount, status,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      entryId, event.deal_id, event.bdr_id, eventId, month,
+      entryId, event.deal_id, event.bdr_id, eventId, event.service_id ?? null, month,
       accrualDate, payableDate, commissionAmount, 'accrued',
       now, now
     );
@@ -256,8 +266,6 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
   }
 
   const rules = rulesResult.data;
-  const commissionRate = rules.base_rate || 0.025;
-  const commissionAmount = event.amount_collected * commissionRate;
   const payoutDelayDays = rules.payout_delay_days || 30;
 
   // Check if this is a deposit service - first 50% uses first_invoice_date, second 50% uses completion_date (collection_date)
@@ -274,9 +282,16 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     }
   }
   const isDeposit = service?.billing_type === 'deposit';
+  const commissionRate = rules?.base_rate || 0.025; // 2.5% for all including renewals (uplift)
+  const commissionAmount = event.amount_collected * commissionRate;
   
   let isDepositSecondHalf = false;
-  if (isDeposit && deal.first_invoice_date && service?.completion_date) {
+  // For paid_on_completion: accrual = completion date (collection_date), normalized to YYYY-MM-DD
+  if (service?.billing_type === 'paid_on_completion') {
+    accrualDate = typeof event.collection_date === 'string'
+      ? event.collection_date.split('T')[0]
+      : format(new Date(event.collection_date), 'yyyy-MM-dd');
+  } else if (isDeposit && deal.first_invoice_date && service?.completion_date) {
     const completionDateStr = typeof service.completion_date === 'string' 
       ? service.completion_date.split('T')[0] 
       : format(new Date(service.completion_date), 'yyyy-MM-dd');
@@ -296,7 +311,7 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     accrualDate = event.collection_date;
   }
 
-  // payable_date: renewal = 7 days after close (full commission, no spread). Deposit/second 50%/first payment: no delay. MRR: 30-day cadence. Quarterly: 90-day cadence.
+  // payable_date: renewal = 7 days after close (full commission, no spread). Deposit/second 50%/first payment: no delay. MRR: monthly cadence. Quarterly: 90-day cadence.
   const firstInvoiceDateStr = deal.first_invoice_date
     ? (typeof deal.first_invoice_date === 'string' ? deal.first_invoice_date.split('T')[0] : format(new Date(deal.first_invoice_date), 'yyyy-MM-dd'))
     : null;
@@ -304,9 +319,13 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
 
   let payableDate: string;
   const revBilling = (event.billing_type || service?.billing_type || '').toLowerCase();
-  if (revBilling === 'renewal') {
+  if (service?.billing_type === 'paid_on_completion') {
+    payableDate = format(addDays(parseISO(accrualDate), 7), 'yyyy-MM-dd');
+  } else if (revBilling === 'renewal') {
     payableDate = accrualDate;
-  } else if (isDepositSecondHalf || isFirstPayment) {
+  } else if (isDepositSecondHalf) {
+    payableDate = format(addDays(parseISO(accrualDate), 7), 'yyyy-MM-dd');
+  } else if (isFirstPayment) {
     payableDate = accrualDate;
   } else {
     if ((revBilling === 'monthly' || revBilling === 'mrr') && firstInvoiceDateStr) {
@@ -319,7 +338,7 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
       const paymentIndex = (sameDealService || []).findIndex((r: any) => r.id === eventId);
       const index = paymentIndex >= 0 ? paymentIndex : 0;
       const firstInvoiceObj = parseISO(firstInvoiceDateStr);
-      payableDate = format(addDays(firstInvoiceObj, index * payoutDelayDays), 'yyyy-MM-dd');
+      payableDate = format(addMonths(firstInvoiceObj, index), 'yyyy-MM-dd');
     } else if ((revBilling === 'quarterly') && firstInvoiceDateStr) {
       const { data: sameDealService } = await supabase.from('revenue_events')
         .select('id, collection_date')
@@ -429,11 +448,13 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
       let serviceBillingType: 'one_off' | 'monthly' | 'quarterly' | 'renewal' = service.billing_type === 'mrr' ? 'monthly' : 
                                                                                 service.billing_type === 'quarterly' ? 'quarterly' : 'one_off';
       
-      // Determine original value for uplift: service-level, or deal-level fallback
+      // Only services explicitly marked renewal get renewal treatment. Other services in the same
+      // deal follow standard process (deposit, one_off, mrr, quarterly, paid_on_completion).
+      const isRenewalService = serviceMarkedRenewal;
       let originalServiceValue: number;
-      if (serviceMarkedRenewal && (service.original_service_value != null && service.original_service_value > 0)) {
+      if (isRenewalService && (service.original_service_value != null && service.original_service_value > 0)) {
         originalServiceValue = Number(service.original_service_value);
-      } else if (isRenewalDeal && dealOriginalValue > 0) {
+      } else if (isRenewalService && isRenewalDeal && dealOriginalValue > 0) {
         if (services.length === 1) {
           originalServiceValue = dealOriginalValue;
         } else {
@@ -441,13 +462,11 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
           originalServiceValue = dealOriginalValue * proportion;
         }
-      } else if (serviceMarkedRenewal) {
+      } else if (isRenewalService) {
         continue; // Service marked renewal but no original value - skip to avoid commission on full amount
       } else {
-        originalServiceValue = 0;
+        originalServiceValue = 0; // Not a renewal - will use standard billing logic
       }
-
-      const isRenewalService = serviceMarkedRenewal || (isRenewalDeal && dealOriginalValue > 0);
       if (isRenewalService) {
         const renewalServiceValue = Number(service.commissionable_value || 0);
         const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
@@ -460,8 +479,8 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
         }
       }
       
+      // Renewals: single commission entry at 2.5% on uplift (regardless of deposit/one_off/mrr/quarterly billing)
       if (isRenewalService && serviceBillingType === 'renewal') {
-        // Renewals: full commission payable 7 days after close (existing business, not spread like MRR/quarterly)
         const closeDate = deal.close_date
           ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
           : firstInvoiceDate;
@@ -474,6 +493,62 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           renewalPayableDate,
           'renewal',
           'renewal',
+          true
+        );
+        continue;
+      }
+
+      // Deposit: 50/50 split (non-renewals only)
+      if (service.billing_type === 'deposit') {
+        const closeDate = deal.close_date
+          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
+          : firstInvoiceDate;
+        const firstHalfAmount = service.commissionable_value * 0.5;
+        const firstHalfDate = closeDate;
+        const firstHalfStage = firstHalfDate <= today ? 'completion' : 'scheduled';
+        await createRevenueEvent(
+          dealId,
+          service.id,
+          deal.bdr_id,
+          firstHalfAmount,
+          firstHalfDate,
+          'one_off',
+          firstHalfStage,
+          true
+        );
+        if (service.completion_date) {
+          const secondHalfAmount = service.commissionable_value * 0.5;
+          const secondHalfDate = typeof service.completion_date === 'string'
+            ? parseISO(service.completion_date)
+            : new Date(service.completion_date);
+          const secondHalfStage = secondHalfDate <= today ? 'completion' : 'scheduled';
+          await createRevenueEvent(
+            dealId,
+            service.id,
+            deal.bdr_id,
+            secondHalfAmount,
+            secondHalfDate,
+            'one_off',
+            secondHalfStage,
+            true
+          );
+        }
+      } else if (service.billing_type === 'paid_on_completion') {
+        const sourceDate = service.completion_date || deal.first_invoice_date;
+        if (!sourceDate) continue;
+        const completionDateStr = typeof sourceDate === 'string'
+          ? sourceDate.split('T')[0]
+          : format(new Date(sourceDate), 'yyyy-MM-dd');
+        const completionDate = parseISO(completionDateStr);
+        const paymentStage = completionDate <= today ? 'completion' : 'scheduled';
+        await createRevenueEvent(
+          dealId,
+          service.id,
+          deal.bdr_id,
+          serviceAmount,
+          completionDate,
+          'one_off',
+          paymentStage,
           true
         );
       } else if (service.billing_type === 'one_off') {
@@ -489,12 +564,12 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           true
         );
       } else if (service.billing_type === 'mrr') {
-        // Monthly recurring: first payment on first_invoice_date, then every 30 days from there
+        // Monthly recurring: first payment on first_invoice_date, then every calendar month
         const contractMonths = service.contract_months || 12;
         const monthlyAmount = (service.monthly_price || 0) * (service.quantity || 1);
         
         for (let i = 0; i < contractMonths; i++) {
-          const paymentDate = addDays(firstInvoiceDate, i * 30); // First: +0 days, then +30, +60, +90...
+          const paymentDate = addMonths(firstInvoiceDate, i); // First: +0 months, then +1, +2, +3...
           const paymentStage = paymentDate <= today ? 'invoice' : 'scheduled';
           
           await createRevenueEvent(
@@ -528,44 +603,28 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
             true
           );
         }
-      } else if (service.billing_type === 'deposit') {
-        // Deposit: 50/50 split
-        // First 50%: revenue collected on close_date, but commission allocated based on first_invoice_date
-        const closeDate = deal.close_date 
-          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
-          : firstInvoiceDate;
-        const firstHalfAmount = service.commissionable_value * 0.5;
-        const firstHalfDate = closeDate; // Collection date is close_date
-        const firstHalfStage = firstHalfDate <= today ? 'completion' : 'scheduled';
-        
-        await createRevenueEvent(
-          dealId,
-          service.id,
-          deal.bdr_id,
-          firstHalfAmount,
-          firstHalfDate,
-          'one_off',
-          firstHalfStage,
-          true
-        );
-        
-        // Second 50%: collected on completion_date (scheduled when creating the deal)
-        if (service.completion_date) {
-          const secondHalfAmount = service.commissionable_value * 0.5;
-          const secondHalfDate = typeof service.completion_date === 'string' 
-            ? parseISO(service.completion_date) 
-            : new Date(service.completion_date);
-          const secondHalfStage = secondHalfDate <= today ? 'completion' : 'scheduled';
-          
-          await createRevenueEvent(
-            dealId,
-            service.id,
-            deal.bdr_id,
-            secondHalfAmount,
-            secondHalfDate,
-            'one_off',
-            secondHalfStage,
-            true
+      } else if (service.billing_type === 'percentage_of_net_sales') {
+        // Create placeholder commission entries directly (no revenue events - amount unknown until net sales data)
+        // Same time frames as MRR: first period payable = close_date + 7 days (first_invoice_date), then 30-day cadence
+        const contractMonths = service.contract_months || 12;
+        const rules = db.prepare('SELECT payout_delay_days FROM commission_rules LIMIT 1').get() as { payout_delay_days?: number } | undefined;
+        const payoutDelayDays = rules?.payout_delay_days ?? 30;
+        const { generateUUID } = await import('@/lib/utils/uuid');
+        for (let i = 0; i < contractMonths; i++) {
+          const paymentDate = addDays(firstInvoiceDate, i * payoutDelayDays);
+          const monthStr = format(startOfMonth(paymentDate), 'yyyy-MM-dd');
+          const accrualDate = format(paymentDate, 'yyyy-MM-dd');
+          const payableDate = accrualDate; // Same as MRR: first payable = close+7, subsequent = first_invoice + 30, 60, ...
+          const entryId = generateUUID();
+          const now = new Date().toISOString();
+          db.prepare(`
+            INSERT INTO commission_entries (
+              id, deal_id, bdr_id, service_id, month, accrual_date, payable_date, amount, status,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            entryId, dealId, deal.bdr_id, service.id, monthStr, accrualDate, payableDate, null, 'accrued',
+            now, now
           );
         }
       }
@@ -624,10 +683,12 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
       let serviceBillingType: 'one_off' | 'monthly' | 'quarterly' | 'renewal' = service.billing_type === 'mrr' ? 'monthly' : 
                                                                                 service.billing_type === 'quarterly' ? 'quarterly' : 'one_off';
       
+      // Only services explicitly marked renewal get renewal treatment. Other services follow standard process.
+      const isRenewalService = serviceMarkedRenewal;
       let originalServiceValue: number;
-      if (serviceMarkedRenewal && (service.original_service_value != null && service.original_service_value > 0)) {
+      if (isRenewalService && (service.original_service_value != null && service.original_service_value > 0)) {
         originalServiceValue = Number(service.original_service_value);
-      } else if (isRenewalDeal && dealOriginalValue > 0) {
+      } else if (isRenewalService && isRenewalDeal && dealOriginalValue > 0) {
         if (servicesResult.data!.length === 1) {
           originalServiceValue = dealOriginalValue;
         } else {
@@ -635,13 +696,11 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
           originalServiceValue = dealOriginalValue * proportion;
         }
-      } else if (serviceMarkedRenewal) {
+      } else if (isRenewalService) {
         continue;
       } else {
-        originalServiceValue = 0;
+        originalServiceValue = 0; // Not a renewal - will use standard billing logic
       }
-
-      const isRenewalService = serviceMarkedRenewal || (isRenewalDeal && dealOriginalValue > 0);
       if (isRenewalService) {
         const renewalServiceValue = Number(service.commissionable_value || 0);
         const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
@@ -654,8 +713,8 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
         }
       }
       
+      // Renewals: single commission entry at 2.5% on uplift (regardless of deposit/one_off/mrr/quarterly billing)
       if (isRenewalService && serviceBillingType === 'renewal') {
-        // Renewals: full commission payable 7 days after close (existing business, not spread like MRR/quarterly)
         const closeDate = deal.close_date
           ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
           : firstInvoiceDate;
@@ -668,6 +727,62 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           renewalPayableDate,
           'renewal',
           'renewal',
+          true
+        );
+        continue;
+      }
+
+      // Deposit: 50/50 split (non-renewals only)
+      if (service.billing_type === 'deposit') {
+        const closeDate = deal.close_date
+          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
+          : firstInvoiceDate;
+        const firstHalfAmount = service.commissionable_value * 0.5;
+        const firstHalfDate = closeDate;
+        const firstHalfStage = firstHalfDate <= today ? 'completion' : 'scheduled';
+        await createRevenueEvent(
+          dealId,
+          service.id,
+          deal.bdr_id,
+          firstHalfAmount,
+          firstHalfDate,
+          'one_off',
+          firstHalfStage,
+          true
+        );
+        if (service.completion_date) {
+          const secondHalfAmount = service.commissionable_value * 0.5;
+          const secondHalfDate = typeof service.completion_date === 'string'
+            ? parseISO(service.completion_date)
+            : new Date(service.completion_date);
+          const secondHalfStage = secondHalfDate <= today ? 'completion' : 'scheduled';
+          await createRevenueEvent(
+            dealId,
+            service.id,
+            deal.bdr_id,
+            secondHalfAmount,
+            secondHalfDate,
+            'one_off',
+            secondHalfStage,
+            true
+          );
+        }
+      } else if (service.billing_type === 'paid_on_completion') {
+        const sourceDate = service.completion_date || deal.first_invoice_date;
+        if (!sourceDate) continue;
+        const completionDateStr = typeof sourceDate === 'string'
+          ? sourceDate.split('T')[0]
+          : format(new Date(sourceDate), 'yyyy-MM-dd');
+        const completionDate = parseISO(completionDateStr);
+        const paymentStage = completionDate <= today ? 'completion' : 'scheduled';
+        await createRevenueEvent(
+          dealId,
+          service.id,
+          deal.bdr_id,
+          serviceAmount,
+          completionDate,
+          'one_off',
+          paymentStage,
           true
         );
       } else if (service.billing_type === 'one_off') {
@@ -683,12 +798,12 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           true
         );
       } else if (service.billing_type === 'mrr') {
-        // Monthly recurring: first payment on first_invoice_date, then every 30 days from there
+        // Monthly recurring: first payment on first_invoice_date, then every calendar month
         const contractMonths = service.contract_months || 12;
         const monthlyAmount = (service.monthly_price || 0) * (service.quantity || 1);
         
         for (let i = 0; i < contractMonths; i++) {
-          const paymentDate = addDays(firstInvoiceDate, i * 30); // First: +0 days, then +30, +60, +90...
+          const paymentDate = addMonths(firstInvoiceDate, i); // First: +0 months, then +1, +2, +3...
           const paymentStage = paymentDate <= today ? 'invoice' : 'scheduled';
           
           await createRevenueEvent(
@@ -722,46 +837,29 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
             true
           );
         }
-      } else if (service.billing_type === 'deposit') {
-        // Deposit: 50/50 split
-        // First 50%: collected on close_date (same day as closing, to keep it in the same month)
-        // Note: Commission payable date is still calculated separately and may be 7+ days after
-        const closeDate = deal.close_date 
-          ? (typeof deal.close_date === 'string' ? parseISO(deal.close_date) : new Date(deal.close_date))
-          : firstInvoiceDate;
-        const firstHalfAmount = service.commissionable_value * 0.5;
-        const firstHalfDate = closeDate;
-        const firstHalfStage = firstHalfDate <= today ? 'completion' : 'scheduled';
-        
-        await createRevenueEvent(
-          dealId,
-          service.id,
-          deal.bdr_id,
-          firstHalfAmount,
-          firstHalfDate,
-          'one_off',
-          firstHalfStage,
-          true
-        );
-        
-        // Second 50%: collected on completion_date (scheduled when creating the deal)
-        if (service.completion_date) {
-          const secondHalfAmount = service.commissionable_value * 0.5;
-          const secondHalfDate = typeof service.completion_date === 'string' 
-            ? parseISO(service.completion_date) 
-            : new Date(service.completion_date);
-          const secondHalfStage = secondHalfDate <= today ? 'completion' : 'scheduled';
-          
-          await createRevenueEvent(
-            dealId,
-            service.id,
-            deal.bdr_id,
-            secondHalfAmount,
-            secondHalfDate,
-            'one_off',
-            secondHalfStage,
-            true
-          );
+      } else if (service.billing_type === 'percentage_of_net_sales') {
+        // Create placeholder commission entries directly (no revenue events - amount unknown until net sales data)
+        // Same time frames as MRR: first period payable = close_date + 7 days (first_invoice_date), then 30-day cadence
+        const contractMonths = service.contract_months || 12;
+        const rulesResult = await supabase.from('commission_rules').select('payout_delay_days').order('updated_at', { ascending: false }).limit(1).single();
+        const payoutDelayDays = rulesResult.data?.payout_delay_days ?? 30;
+        const { generateUUID } = await import('@/lib/utils/uuid');
+        for (let i = 0; i < contractMonths; i++) {
+          const paymentDate = addDays(firstInvoiceDate, i * payoutDelayDays);
+          const monthStr = format(startOfMonth(paymentDate), 'yyyy-MM-dd');
+          const accrualDate = format(paymentDate, 'yyyy-MM-dd');
+          const payableDate = accrualDate; // Same as MRR: first payable = close+7, subsequent = first_invoice + 30, 60, ...
+          await supabase.from('commission_entries').insert({
+            id: generateUUID(),
+            deal_id: dealId,
+            bdr_id: deal.bdr_id,
+            service_id: service.id,
+            month: monthStr,
+            accrual_date: accrualDate,
+            payable_date: payableDate,
+            amount: null,
+            status: 'accrued',
+          });
         }
       }
     }

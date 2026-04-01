@@ -8,7 +8,7 @@ import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { exportDealsToCSV } from '@/lib/utils/csv-export';
-import useSWR from 'swr';
+import useSWR, { mutate as globalMutate } from 'swr';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -27,6 +27,7 @@ interface Deal {
   close_date: string | null;
   cancellation_date: string | null;
   is_renewal?: boolean;
+  has_override?: boolean;
   deal_services?: Array<{ is_renewal?: boolean | number }>;
   bdr_reps?: {
     name: string;
@@ -44,24 +45,39 @@ const fetcher = async (url: string) => {
   return data;
 };
 
+const PAGE_SIZE = 50;
+
 export default function DealsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [page, setPage] = useState(1);
   const [isAdmin, setIsAdmin] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const pathname = usePathname();
 
-  // Use SWR for data fetching with automatic caching
-  const url = statusFilter === 'all' ? '/api/deals' : `/api/deals?status=${statusFilter}`;
+  // Build URL with pagination and status filter
+  const params = new URLSearchParams();
+  if (statusFilter !== 'all') params.set('status', statusFilter);
+  params.set('page', String(page));
+  params.set('limit', String(PAGE_SIZE));
+  const url = `/api/deals?${params.toString()}`;
+
   const { data: dealsRaw, error, isLoading: loading, mutate } = useSWR<any>(url, fetcher, {
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
-    dedupingInterval: 0, // Always fetch fresh data when returning to list
+    dedupingInterval: 0,
   });
   
-  // Extract deals array from paginated response
+  // Extract deals array and pagination from API response
   const deals: Deal[] = Array.isArray(dealsRaw) 
     ? dealsRaw 
     : (dealsRaw?.data || []);
+  const pagination = dealsRaw?.pagination || { page: 1, limit: PAGE_SIZE, total: deals.length, totalPages: 1 };
+
+  // Reset to page 1 when status filter changes
+  const handleStatusChange = (value: string) => {
+    setStatusFilter(value);
+    setPage(1);
+  };
 
   // Fetch admin status once
   useSWR('/api/auth/user', fetcher, {
@@ -106,6 +122,10 @@ export default function DealsPage() {
 
       // Delete succeeded - immediately update local cache to remove the deal
       mutate(deals.filter(d => d.id !== dealId), false);
+
+      // Invalidate dashboard so stats/numbers update when user goes back
+      globalMutate('/api/dashboard/stats');
+      globalMutate('/api/dashboard/trend');
       
       // Then force a fresh fetch from server to ensure consistency
       // Add a small delay to ensure the database has processed the delete
@@ -182,6 +202,11 @@ export default function DealsPage() {
                           {(deal.is_renewal || deal.deal_services?.some?.((s: any) => s.is_renewal === true || s.is_renewal === 1)) && (
                             <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
                               Renewal
+                            </Badge>
+                          )}
+                          {deal.has_override && (
+                            <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                              Override
                             </Badge>
                           )}
                           {isCancelled && (
@@ -269,8 +294,8 @@ export default function DealsPage() {
             </Alert>
           )}
 
-          <div className="mb-4">
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <div className="mb-4 flex flex-wrap items-center gap-4">
+            <Select value={statusFilter} onValueChange={handleStatusChange}>
               <SelectTrigger className="w-[180px]">
                 <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
@@ -281,7 +306,35 @@ export default function DealsPage() {
                 <SelectItem value="closed-lost">Closed-Lost</SelectItem>
               </SelectContent>
             </Select>
+            <span className="text-sm text-muted-foreground">
+              Showing {deals.length === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} deals
+            </span>
           </div>
+
+          {/* Pagination controls */}
+          {pagination.totalPages > 1 && (
+            <div className="mb-4 flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page <= 1}
+              >
+                Previous
+              </Button>
+              <span className="text-sm">
+                Page {pagination.page} of {pagination.totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage(p => Math.min(pagination.totalPages, p + 1))}
+                disabled={page >= pagination.totalPages}
+              >
+                Next
+              </Button>
+            </div>
+          )}
 
           {/* Active Deals Section */}
           {renderDealsTable(activeDeals, 'Active Deals', false)}

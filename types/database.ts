@@ -105,10 +105,12 @@ export interface Database {
           deal_id: string;
           bdr_id: string;
           revenue_event_id: string | null;
+          invoiced_batch_id: string | null;
+          service_id: string | null;
           month: string;
           accrual_date: string | null;
           payable_date: string | null;
-          amount: number;
+          amount: number | null;
           status: 'accrued' | 'pending' | 'payable' | 'paid' | 'cancelled';
           created_at: string;
           updated_at: string;
@@ -118,10 +120,12 @@ export interface Database {
           deal_id: string;
           bdr_id: string;
           revenue_event_id?: string | null;
+          invoiced_batch_id?: string | null;
+          service_id?: string | null;
           month: string;
           accrual_date?: string | null;
           payable_date?: string | null;
-          amount: number;
+          amount?: number | null;
           status?: 'accrued' | 'pending' | 'payable' | 'paid' | 'cancelled';
           created_at?: string;
           updated_at?: string;
@@ -130,11 +134,72 @@ export interface Database {
           deal_id: string;
           bdr_id: string;
           revenue_event_id: string | null;
+          invoiced_batch_id: string | null;
+          service_id: string | null;
           month: string;
           accrual_date: string | null;
           payable_date: string | null;
-          amount: number;
+          amount: number | null;
           status: 'accrued' | 'pending' | 'payable' | 'paid' | 'cancelled';
+          created_at: string;
+          updated_at: string;
+        }>;
+      };
+      commission_batches: {
+        Row: {
+          id: string;
+          bdr_id: string;
+          run_date: string;
+          status: 'draft' | 'approved' | 'paid';
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          bdr_id: string;
+          run_date: string;
+          status?: 'draft' | 'approved' | 'paid';
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          bdr_id: string;
+          run_date: string;
+          status: 'draft' | 'approved' | 'paid';
+          created_at: string;
+          updated_at: string;
+        }>;
+      };
+      commission_batch_items: {
+        Row: {
+          id: string;
+          batch_id: string;
+          commission_entry_id: string;
+          override_amount: number | null;
+          override_payment_date: string | null;
+          override_commission_rate: number | null;
+          adjustment_note: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          batch_id: string;
+          commission_entry_id: string;
+          override_amount?: number | null;
+          override_payment_date?: string | null;
+          override_commission_rate?: number | null;
+          adjustment_note?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          batch_id: string;
+          commission_entry_id: string;
+          override_amount: number | null;
+          override_payment_date: string | null;
+          override_commission_rate: number | null;
+          adjustment_note: string | null;
           created_at: string;
           updated_at: string;
         }>;
@@ -145,7 +210,7 @@ export interface Database {
           deal_id: string;
           service_name: string;
           service_type: string;
-          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly';
+          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales';
           unit_price: number;
           monthly_price: number | null;
           quarterly_price: number | null;
@@ -153,6 +218,7 @@ export interface Database {
           contract_months: number;
           contract_quarters: number;
           commission_rate: number | null;
+          billing_percentage: number | null;
           commissionable_value: number;
           commission_amount: number;
           completion_date: string | null;
@@ -164,7 +230,7 @@ export interface Database {
           deal_id: string;
           service_name: string;
           service_type: string;
-          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly';
+          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales';
           unit_price: number;
           monthly_price?: number | null;
           quarterly_price?: number | null;
@@ -172,6 +238,7 @@ export interface Database {
           contract_months?: number;
           contract_quarters?: number;
           commission_rate?: number | null;
+          billing_percentage?: number | null;
           commissionable_value: number;
           commission_amount: number;
           completion_date?: string | null;
@@ -182,7 +249,7 @@ export interface Database {
           deal_id: string;
           service_name: string;
           service_type: string;
-          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly';
+          billing_type: 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales';
           unit_price: number;
           monthly_price: number | null;
           quarterly_price: number | null;
@@ -190,6 +257,7 @@ export interface Database {
           contract_months: number;
           contract_quarters: number;
           commission_rate: number | null;
+          billing_percentage: number | null;
           commissionable_value: number;
           commission_amount: number;
           completion_date: string | null;

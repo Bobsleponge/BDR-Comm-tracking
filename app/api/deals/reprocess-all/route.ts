@@ -49,6 +49,16 @@ export async function POST(request: NextRequest) {
         
         await Promise.all(batch.map(async (deal) => {
           try {
+            // Skip deals with entries in approved/paid batches (prevents duplicate commissions)
+            const inApprovedBatch = db.prepare(`
+              SELECT 1 FROM commission_entries ce
+              JOIN commission_batch_items cbi ON cbi.commission_entry_id = ce.id
+              JOIN commission_batches cb ON cbi.batch_id = cb.id
+              WHERE ce.deal_id = ? AND cb.status IN ('approved', 'paid')
+              LIMIT 1
+            `).get(deal.id) as { '1': number } | undefined;
+            if (inApprovedBatch) return;
+
             // Clear existing revenue events and commission entries for this deal (prevents duplicates)
             db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(deal.id);
             db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(deal.id);
@@ -123,6 +133,17 @@ export async function POST(request: NextRequest) {
       
       await Promise.all(batch.map(async (deal: any) => {
         try {
+          // Skip deals with entries in approved/paid batches
+          const { data: dealEntries } = await supabase.from('commission_entries').select('id').eq('deal_id', deal.id);
+          if (dealEntries?.length) {
+            const { data: cbi } = await supabase.from('commission_batch_items').select('batch_id').in('commission_entry_id', dealEntries.map((e: any) => e.id));
+            const batchIds = [...new Set((cbi || []).map((r: any) => r.batch_id))];
+            if (batchIds.length > 0) {
+              const { data: statuses } = await supabase.from('commission_batches').select('status').in('id', batchIds);
+              if ((statuses || []).some((b: any) => ['approved', 'paid'].includes(b.status))) return;
+            }
+          }
+
           await createRevenueEventsForDeal(deal.id);
 
           const { data: revenueEvents } = await (supabase

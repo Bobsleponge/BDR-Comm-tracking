@@ -48,6 +48,17 @@ async function updateDealValue(dealId: string) {
   }
 }
 
+async function setDealFirstInvoiceDate(dealId: string, firstInvoiceDate: string) {
+  if (USE_LOCAL_DB) {
+    const { getLocalDB } = await import('@/lib/db/local-db');
+    const db = getLocalDB();
+    db.prepare('UPDATE deals SET first_invoice_date = ?, updated_at = datetime(\'now\') WHERE id = ?').run(firstInvoiceDate, dealId);
+  } else {
+    const supabase = await createClient();
+    await (supabase as any).from('deals').update({ first_invoice_date: firstInvoiceDate }).eq('id', dealId);
+  }
+}
+
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; serviceId: string }> }
@@ -93,11 +104,12 @@ export async function PATCH(
         ...updateData,
       };
 
-      // Calculate commission - for renewals use uplift, otherwise standard calculation
+      // Calculate commission - for renewals use uplift; percentage_of_net_sales uses 0
       const baseRate = await getBaseCommissionRate();
+      const unitPrice = mergedData.billing_type === 'percentage_of_net_sales' ? 0 : (mergedData.unit_price ?? service.unit_price ?? 0);
       const commission = calculateServiceCommission(
         mergedData.billing_type,
-        mergedData.unit_price,
+        unitPrice,
         mergedData.monthly_price || null,
         mergedData.quarterly_price || null,
         mergedData.quantity,
@@ -141,6 +153,7 @@ export async function PATCH(
           contract_months = ?,
           contract_quarters = ?,
           commission_rate = ?,
+          billing_percentage = ?,
           commissionable_value = ?,
           commission_amount = ?,
           completion_date = ?,
@@ -152,13 +165,14 @@ export async function PATCH(
         mergedData.service_name,
         mergedData.service_type,
         mergedData.billing_type,
-        mergedData.unit_price ?? 0,
+        unitPrice,
         toBind(mergedData.monthly_price),
         toBind(mergedData.quarterly_price),
         mergedData.quantity ?? 1,
         mergedData.contract_months ?? 12,
         mergedData.contract_quarters ?? 4,
         toBind(mergedData.commission_rate),
+        toBind(mergedData.billing_percentage),
         commissionableValue,
         commissionAmount,
         toBind(mergedData.completion_date),
@@ -169,6 +183,14 @@ export async function PATCH(
 
       // Update deal value
       await updateDealValue(dealId);
+
+      // For paid_on_completion: set first_invoice_date = expected completion date (scheduled payment)
+      if (mergedData.billing_type === 'paid_on_completion' && mergedData.completion_date) {
+        const dateStr = typeof mergedData.completion_date === 'string'
+          ? mergedData.completion_date.split('T')[0]
+          : mergedData.completion_date;
+        await setDealFirstInvoiceDate(dealId, dateStr);
+      }
 
       // Reprocess deal: recreate revenue events and commission entries with updated service data
       const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
@@ -212,11 +234,12 @@ export async function PATCH(
       ...updateData,
     };
 
-    // Calculate commission - for renewals use uplift, otherwise standard
+    // Calculate commission - for renewals use uplift; percentage_of_net_sales uses 0
     const baseRate = await getBaseCommissionRate();
+    const unitPrice = mergedData.billing_type === 'percentage_of_net_sales' ? 0 : (mergedData.unit_price ?? service.unit_price ?? 0);
     const commission = calculateServiceCommission(
       mergedData.billing_type,
-      mergedData.unit_price,
+      unitPrice,
       mergedData.monthly_price || null,
       mergedData.quarterly_price || null,
       mergedData.quantity,
@@ -246,6 +269,7 @@ export async function PATCH(
 
     const updatePayload: Record<string, any> = {
       ...updateData,
+      unit_price: unitPrice,
       commissionable_value: commissionableValue,
       commission_amount: commissionAmount,
     };
@@ -269,6 +293,15 @@ export async function PATCH(
 
     // Update deal value
     await updateDealValue(dealId);
+
+    // For paid_on_completion: set first_invoice_date = expected completion date (scheduled payment)
+    const finalData = updatedService || { ...service, ...updateData };
+    if (finalData.billing_type === 'paid_on_completion' && finalData.completion_date) {
+      const dateStr = typeof finalData.completion_date === 'string'
+        ? finalData.completion_date.split('T')[0]
+        : finalData.completion_date;
+      await setDealFirstInvoiceDate(dealId, dateStr);
+    }
 
     // Reprocess deal: recreate revenue events and commission entries
     const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');

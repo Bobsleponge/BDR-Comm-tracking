@@ -1,6 +1,6 @@
 'use client';
 
-import { format } from 'date-fns';
+import { format, addDays } from 'date-fns';
 import type { Database } from '@/types/database';
 
 type DealService = Database['public']['Tables']['deal_services']['Row'];
@@ -43,6 +43,8 @@ export function CommissionBreakdown({
         return 'Recurring Quarterly';
       case 'deposit':
         return 'Deposit-Based Billing (50% / 50%)';
+      case 'paid_on_completion':
+        return 'Paid on Completion';
       default:
         return type;
     }
@@ -119,25 +121,32 @@ export function CommissionBreakdown({
                         <span className="text-gray-500">Quantity:</span>
                         <span className="text-gray-900">{service.quantity}</span>
                       </div>
-                      {service.billing_type === 'deposit' && (
+                      {(service.billing_type === 'deposit' || service.billing_type === 'paid_on_completion') && service.completion_date && (
                         <>
-                          {service.completion_date && (
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Completion Date:</span>
-                              <span className="text-gray-900">
-                                {format(new Date(service.completion_date), 'MMM d, yyyy')}
-                              </span>
+                          <div className="flex justify-between">
+                            <span className="text-gray-500">
+                              {service.billing_type === 'paid_on_completion' ? 'Estimated Completion:' : 'Completion Date:'}
+                            </span>
+                            <span className="text-gray-900">
+                              {format(new Date(service.completion_date), 'MMM d, yyyy')}
+                            </span>
+                          </div>
+                          {service.billing_type === 'paid_on_completion' && (
+                            <div className="mt-1 text-xs text-gray-500">
+                              Commission payable: {format(addDays(new Date(service.completion_date), 7), 'MMM d, yyyy')} (7 days after completion)
                             </div>
                           )}
-                          <div className="mt-2 p-2 bg-blue-50 rounded text-xs text-blue-700">
-                            Commission split: 50% on acceptance, 50% on completion date.
-                            {service.completion_date && (
-                              <span className="block mt-1">
-                                Second payment due: {format(new Date(service.completion_date), 'MMM d, yyyy')}
-                              </span>
-                            )}
-                          </div>
                         </>
+                      )}
+                      {service.billing_type === 'deposit' && (
+                        <div className="mt-2 p-2 bg-blue-50 rounded text-xs text-blue-700">
+                          Commission split: 50% on acceptance, 50% on completion date (7-day funds-processing delay for second 50%).
+                          {service.completion_date && (
+                            <span className="block mt-1">
+                              Second payment due: {format(new Date(service.completion_date), 'MMM d, yyyy')} → commission payable: {format(addDays(new Date(service.completion_date), 7), 'MMM d, yyyy')}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </>
                   )}

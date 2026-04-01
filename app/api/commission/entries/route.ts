@@ -44,6 +44,7 @@ export async function GET(request: NextRequest) {
           ce.*,
           d.client_name as deals_client_name,
           d.service_type as deals_service_type,
+          d.is_renewal as deals_is_renewal,
           br.name as bdr_reps_name,
           br.email as bdr_reps_email,
           re.id as revenue_events_id,
@@ -52,12 +53,13 @@ export async function GET(request: NextRequest) {
           re.collection_date as revenue_events_collection_date,
           re.billing_type as revenue_events_billing_type,
           re.payment_stage as revenue_events_payment_stage,
-          ds.service_name as deal_services_service_name
+          ds.service_name as deal_services_service_name,
+          ds.is_renewal as deal_services_is_renewal
         FROM commission_entries ce
         INNER JOIN deals d ON ce.deal_id = d.id
         LEFT JOIN bdr_reps br ON ce.bdr_id = br.id
         LEFT JOIN revenue_events re ON ce.revenue_event_id = re.id
-        LEFT JOIN deal_services ds ON re.service_id = ds.id
+        LEFT JOIN deal_services ds ON (re.service_id = ds.id OR ce.service_id = ds.id)
         WHERE d.cancellation_date IS NULL
       `;
       const params: any[] = [];
@@ -78,8 +80,8 @@ export async function GET(request: NextRequest) {
       }
 
       if (payableMonth) {
-        // Filter by payable_date in the specified month (YYYY-MM format)
-        query += ' AND strftime("%Y-%m", ce.payable_date) = ?';
+        // Filter by payable month (payable_date, accrual_date, or month)
+        query += " AND strftime('%Y-%m', COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01')) = ?";
         params.push(payableMonth);
       }
 
@@ -87,6 +89,11 @@ export async function GET(request: NextRequest) {
       params.push(limit, offset);
 
       const entries = db.prepare(query).all(...params) as any[];
+
+      // Determine which entries are approved (in paid reports via fingerprints)
+      const fingerprints = db.prepare('SELECT bdr_id, deal_id, effective_date FROM approved_commission_fingerprints').all() as Array<{ bdr_id: string; deal_id: string; effective_date: string }>;
+      const fpSet = new Set(fingerprints.map(f => `${f.bdr_id}|${f.deal_id}|${f.effective_date}`));
+      const getEffectiveDate = (e: any) => e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
       
       // Get total count for pagination metadata
       let countQuery = `
@@ -110,7 +117,7 @@ export async function GET(request: NextRequest) {
         countParams.push(month);
       }
       if (payableMonth) {
-        countQuery += ' AND strftime("%Y-%m", ce.payable_date) = ?';
+        countQuery += " AND strftime('%Y-%m', COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01')) = ?";
         countParams.push(payableMonth);
       }
       
@@ -118,26 +125,35 @@ export async function GET(request: NextRequest) {
       const total = totalResult?.total || 0;
 
       // Transform results to match expected format (only include essential fields)
-      const entriesWithRelations = entries.map(entry => ({
-        ...entry,
-        deals: entry.deals_client_name ? {
-          client_name: entry.deals_client_name,
-          service_type: entry.deals_service_type,
-        } : null,
-        bdr_reps: entry.bdr_reps_name ? {
-          name: entry.bdr_reps_name,
-          email: entry.bdr_reps_email,
-        } : null,
-        revenue_events: entry.revenue_events_id ? {
-          id: entry.revenue_events_id,
-          service_id: entry.revenue_events_service_id,
-          amount_collected: entry.revenue_events_amount_collected,
-          collection_date: entry.revenue_events_collection_date,
-          billing_type: entry.revenue_events_billing_type,
-          payment_stage: entry.revenue_events_payment_stage,
-          service_name: entry.deal_services_service_name,
-        } : null,
-      }));
+      const entriesWithRelations = entries.map(entry => {
+        const serviceIsRenewal = entry.deal_services_is_renewal === 1 || entry.deal_services_is_renewal === true;
+        const dealIsRenewal = entry.deals_is_renewal === 1 || entry.deals_is_renewal === true;
+        const isRenewal = serviceIsRenewal || dealIsRenewal;
+        const effectiveDate = getEffectiveDate(entry);
+        const isApproved = effectiveDate && fpSet.has(`${entry.bdr_id}|${entry.deal_id}|${effectiveDate}`);
+        return {
+          ...entry,
+          is_approved: isApproved,
+          is_renewal: isRenewal,
+          deals: entry.deals_client_name ? {
+            client_name: entry.deals_client_name,
+            service_type: entry.deals_service_type,
+          } : null,
+          bdr_reps: entry.bdr_reps_name ? {
+            name: entry.bdr_reps_name,
+            email: entry.bdr_reps_email,
+          } : null,
+          revenue_events: entry.revenue_events_id ? {
+            id: entry.revenue_events_id,
+            service_id: entry.revenue_events_service_id,
+            amount_collected: entry.revenue_events_amount_collected,
+            collection_date: entry.revenue_events_collection_date,
+            billing_type: entry.revenue_events_billing_type,
+            payment_stage: entry.revenue_events_payment_stage,
+            service_name: entry.deal_services_service_name,
+          } : null,
+        };
+      });
 
       return apiSuccess({
         data: entriesWithRelations,
@@ -158,7 +174,7 @@ export async function GET(request: NextRequest) {
     // Include deal_services to get service_name for each commission entry
     const baseQuery: any = (supabase as any)
       .from('commission_entries')
-      .select('*, deals!inner(client_name, service_type, cancellation_date), bdr_reps(name, email), revenue_events(deal_services(service_name), *)')
+      .select('*, deals!inner(client_name, service_type, is_renewal, cancellation_date), bdr_reps(name, email), revenue_events(deal_services(service_name, is_renewal), *)')
       .is('deals.cancellation_date', null)
       .order('accrual_date', { ascending: false, nullsFirst: false })
       .order('month', { ascending: false });
@@ -185,8 +201,8 @@ export async function GET(request: NextRequest) {
     }
 
     if (payableMonth) {
-      // Filter by payable_date in the specified month (YYYY-MM format)
-      query = query.like('payable_date', `${payableMonth}%`);
+      // Filter by payable month (payable_date first, then accrual_date, then month)
+      query = query.or(`payable_date.like.${payableMonth}%,accrual_date.like.${payableMonth}%,month.like.${payableMonth}%`);
     }
 
     // Add pagination
@@ -202,24 +218,30 @@ export async function GET(request: NextRequest) {
       return apiError(error.message || 'Failed to fetch commission entries', 500);
     }
 
-    // Transform Supabase response to include service_name in revenue_events
+    // Transform Supabase response to include service_name and is_renewal in revenue_events
     const transformedData = (data || []).map((entry: any) => {
-      if (entry.revenue_events && entry.revenue_events.deal_services) {
-        // Extract service_name from nested deal_services
-        const serviceName = Array.isArray(entry.revenue_events.deal_services) 
-          ? entry.revenue_events.deal_services[0]?.service_name 
-          : entry.revenue_events.deal_services?.service_name;
-        
-        return {
-          ...entry,
+      let result = { ...entry };
+      const serviceObj = entry.revenue_events?.deal_services;
+      const ds = Array.isArray(serviceObj) ? serviceObj[0] : serviceObj;
+      const serviceIsRenewal = ds?.is_renewal === true;
+      const dealIsRenewal = entry.deals?.is_renewal === true;
+      const isRenewal = serviceIsRenewal || dealIsRenewal;
+
+      if (entry.revenue_events) {
+        const serviceName = ds?.service_name;
+        result = {
+          ...result,
+          is_renewal: isRenewal,
           revenue_events: {
             ...entry.revenue_events,
             service_name: serviceName,
             deal_services: undefined, // Remove nested structure
           }
         };
+      } else {
+        result.is_renewal = isRenewal;
       }
-      return entry;
+      return result;
     });
 
     // Get total count if not provided by Supabase

@@ -78,17 +78,24 @@ export function exportCommissionToCSV(entries: any[]) {
     'Month',
     'Client Name',
     'Service Type',
-    'Amount',
+    'Amount claimed on',
+    'Is renewal',
+    'Commission amount',
     'Status',
   ];
 
-  const csvData = entries.map(entry => ({
-    'Month': entry.month,
-    'Client Name': entry.deals?.client_name || '',
-    'Service Type': entry.deals?.service_type || '',
-    'Amount': entry.amount,
-    'Status': entry.status,
-  }));
+  const csvData = entries.map(entry => {
+    const amountCollected = entry.revenue_events?.amount_collected ?? 0;
+    return {
+      'Month': entry.month,
+      'Client Name': entry.deals?.client_name || '',
+      'Service Type': entry.deals?.service_type || '',
+      'Amount claimed on': amountCollected > 0 ? amountCollected.toFixed(2) : '',
+      'Is renewal': entry.is_renewal ? 'Yes' : 'No',
+      'Commission amount': entry.amount,
+      'Status': entry.status,
+    };
+  });
 
   const csv = convertToCSV(csvData, headers);
   downloadCSV(csv, `commission-export-${new Date().toISOString().split('T')[0]}.csv`);

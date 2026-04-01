@@ -64,16 +64,33 @@ export async function GET(request: NextRequest) {
       
       const totalResult = db.prepare(countQuery).get(...countParams) as { total: number };
       const total = totalResult?.total || 0;
-      
-      query += ' ORDER BY deals.created_at DESC LIMIT ? OFFSET ?';
+
+      // For closed-won deals, sort by close date (most recently closed first)
+      const orderBy = status === 'closed-won'
+        ? 'ORDER BY COALESCE(deals.close_date, deals.proposal_date, deals.created_at) DESC'
+        : 'ORDER BY deals.created_at DESC';
+      query += ` ${orderBy} LIMIT ? OFFSET ?`;
       params.push(limit, offset);
 
       const deals = db.prepare(query).all(...params) as any[];
 
-      // Get deal services for each deal
+      // Deal IDs that have commission batch overrides
+      const overrideDealIds = new Set(
+        (db.prepare(`
+          SELECT DISTINCT ce.deal_id
+          FROM commission_entries ce
+          JOIN commission_batch_items cbi ON cbi.commission_entry_id = ce.id
+          WHERE cbi.override_amount IS NOT NULL
+             OR cbi.override_payment_date IS NOT NULL
+             OR cbi.override_commission_rate IS NOT NULL
+        `).all() as Array<{ deal_id: string }>).map((r) => r.deal_id)
+      );
+
+      // Get deal services and has_override for each deal
       for (const deal of deals) {
         const services = db.prepare('SELECT * FROM deal_services WHERE deal_id = ?').all(deal.id) as any[];
         deal.deal_services = services;
+        deal.has_override = overrideDealIds.has(deal.id);
       }
 
       return apiSuccess({
@@ -88,10 +105,12 @@ export async function GET(request: NextRequest) {
     }
 
     const supabase = await createClient();
+    // For closed-won deals, sort by close date (most recently closed first)
+    const orderCol = status === 'closed-won' ? 'close_date' : 'created_at';
     let query = (supabase as any)
       .from('deals')
       .select('*, deal_services(*), clients(*)')
-      .order('created_at', { ascending: false });
+      .order(orderCol, { ascending: false, nullsFirst: false });
 
     // Filter by BDR ID
     if (!isUserAdmin) {
@@ -114,6 +133,34 @@ export async function GET(request: NextRequest) {
       return apiError(error.message, 500);
     }
 
+    const dealsData = data || [];
+    const dealIds = dealsData.map((d: any) => d.id).filter(Boolean);
+
+    // Deal IDs that have commission batch overrides (Supabase)
+    const overrideDealIds = new Set<string>();
+    if (dealIds.length > 0) {
+      const { data: entries } = await (supabase as any)
+        .from('commission_entries')
+        .select('id, deal_id')
+        .in('deal_id', dealIds);
+      const entryIds = (entries || []).map((e: any) => e.id);
+      const entryToDeal = new Map((entries || []).map((e: any) => [e.id, e.deal_id]));
+      if (entryIds.length > 0) {
+        const { data: batchItems } = await (supabase as any)
+          .from('commission_batch_items')
+          .select('commission_entry_id')
+          .in('commission_entry_id', entryIds)
+          .or('override_amount.not.is.null,override_payment_date.not.is.null,override_commission_rate.not.is.null');
+        for (const item of batchItems || []) {
+          const dealId = entryToDeal.get(item.commission_entry_id);
+          if (typeof dealId === 'string') overrideDealIds.add(dealId);
+        }
+      }
+    }
+    for (const deal of dealsData) {
+      deal.has_override = overrideDealIds.has(deal.id);
+    }
+
     // Get total count if not provided
     let total = count;
     if (total === undefined) {
@@ -123,7 +170,7 @@ export async function GET(request: NextRequest) {
     }
 
     return apiSuccess({
-      data: data || [],
+      data: dealsData,
       pagination: {
         page,
         limit,
@@ -148,6 +195,12 @@ export async function POST(request: NextRequest) {
         `Validation error: ${validationResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`,
         400
       );
+    }
+
+    // All deals must be associated to a client
+    const clientId = body.client_id;
+    if (!clientId || typeof clientId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) {
+      return apiError('Client is required. Please select a client for this deal.', 400);
     }
     
     const { getBdrIdFromUser } = await import('@/lib/utils/auth');
@@ -189,7 +242,7 @@ export async function POST(request: NextRequest) {
       const deal = {
         id: dealId,
         bdr_id: bdrId,
-        client_id: body.client_id || null,
+        client_id: clientId,
         client_name: body.client_name || '',
         service_type: body.service_type || 'Multiple Services', // Default for deals with multiple services
         proposal_date: body.proposal_date || now.split('T')[0],
@@ -215,7 +268,7 @@ export async function POST(request: NextRequest) {
           created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        deal.id, deal.bdr_id, deal.client_id ?? null, deal.client_name, deal.service_type,
+        deal.id, deal.bdr_id, deal.client_id, deal.client_name, deal.service_type,
         deal.proposal_date, deal.close_date ?? null, deal.first_invoice_date ?? null,
         deal.deal_value, deal.original_deal_value ?? null, deal.status, deal.is_renewal,
         deal.original_deal_id ?? null, deal.payout_months, deal.created_at, deal.updated_at

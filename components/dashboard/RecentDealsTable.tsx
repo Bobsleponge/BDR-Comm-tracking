@@ -16,13 +16,15 @@ interface Deal {
   status: 'proposed' | 'closed-won' | 'closed-lost';
   close_date: string | null;
   created_at: string;
+  has_override?: boolean;
 }
 
 interface RecentDealsTableProps {
   deals: Deal[];
+  viewAllHref?: string;
 }
 
-export const RecentDealsTable = memo(function RecentDealsTable({ deals }: RecentDealsTableProps) {
+export const RecentDealsTable = memo(function RecentDealsTable({ deals, viewAllHref }: RecentDealsTableProps) {
   const getStatusVariant = useMemo(() => (status: string): "default" | "secondary" | "destructive" | "outline" => {
     if (status === 'closed-won') return 'default';
     if (status === 'closed-lost') return 'destructive';
@@ -32,7 +34,14 @@ export const RecentDealsTable = memo(function RecentDealsTable({ deals }: Recent
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Recent Deals</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle>Recent Deals</CardTitle>
+          {viewAllHref && (
+            <Link href={viewAllHref}>
+              <Button variant="ghost" size="sm">View all</Button>
+            </Link>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         <div className="overflow-x-auto">
@@ -63,9 +72,16 @@ export const RecentDealsTable = memo(function RecentDealsTable({ deals }: Recent
                       ${deal.deal_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={getStatusVariant(deal.status)}>
-                        {deal.status.replace('-', ' ')}
-                      </Badge>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={getStatusVariant(deal.status)}>
+                          {deal.status.replace('-', ' ')}
+                        </Badge>
+                        {deal.has_override && (
+                          <Badge variant="outline" className="font-normal text-amber-700 bg-amber-50 border-amber-200">
+                            Override
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       {deal.close_date ? format(new Date(deal.close_date), 'MMM d, yyyy') : '-'}

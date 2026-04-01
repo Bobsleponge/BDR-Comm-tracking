@@ -17,7 +17,7 @@ async function createRevenueEvent(
 ): Promise<string> {
   const db = getLocalDB();
   const eventId = generateUUID();
-  const collectionDateStr = collectionDate.toISOString().split('T')[0];
+  const collectionDateStr = format(collectionDate, 'yyyy-MM-dd');
   const now = new Date().toISOString();
 
   db.prepare(`
@@ -149,6 +149,24 @@ async function createRevenueEventsForDeal(dealId: string): Promise<void> {
         secondHalfStage,
         true
       );
+    } else if (service.billing_type === 'paid_on_completion') {
+      const sourceDate = deal.first_invoice_date || service.completion_date;
+      if (!sourceDate) continue;
+      const completionDate = typeof sourceDate === 'string' ? parseISO(sourceDate) : new Date(sourceDate);
+      const dateStr = format(completionDate, 'yyyy-MM-dd');
+      // Set first_invoice_date = expected completion (scheduled payment)
+      db.prepare('UPDATE deals SET first_invoice_date = ?, updated_at = datetime(\'now\') WHERE id = ?').run(dateStr, dealId);
+      const paymentStage = completionDate <= today ? 'completion' : 'scheduled';
+      await createRevenueEvent(
+        dealId,
+        service.id,
+        deal.bdr_id,
+        service.commissionable_value,
+        completionDate,
+        'one_off',
+        paymentStage,
+        true
+      );
     }
   }
 }
@@ -185,9 +203,53 @@ async function processRevenueEvent(eventId: string): Promise<string | null> {
   // Get payout delay days
   const payoutDelayDays = rules.payout_delay_days || 30;
 
-  // collection_date and payable_date are the same (both scheduled 7 days after close date)
-  const accrualDate = event.collection_date;
-  const payableDate = event.collection_date; // Same as collection_date
+  const service = event.service_id
+    ? db.prepare('SELECT * FROM deal_services WHERE id = ?').get(event.service_id) as any
+    : null;
+  const isDeposit = service?.billing_type === 'deposit';
+  const isPaidOnCompletion = service?.billing_type === 'paid_on_completion';
+
+  // For paid_on_completion: accrual = completion date (collection_date), normalized to YYYY-MM-DD
+  let accrualDate: string;
+  if (isPaidOnCompletion) {
+    accrualDate = typeof event.collection_date === 'string'
+      ? event.collection_date.split('T')[0]
+      : format(new Date(event.collection_date), 'yyyy-MM-dd');
+  } else {
+    accrualDate = event.collection_date;
+  }
+  const accrualDateObj = typeof accrualDate === 'string' ? parseISO(accrualDate) : new Date(accrualDate);
+
+  // Calculate payable_date
+  let payableDate: string;
+  const closeDate = deal.close_date || deal.proposal_date;
+  if (!closeDate && !isPaidOnCompletion) {
+    throw new Error('Deal must have close_date or proposal_date for commission calculation');
+  }
+  const closeDateObj = closeDate ? (typeof closeDate === 'string' ? parseISO(closeDate) : new Date(closeDate)) : accrualDateObj;
+
+  if (isPaidOnCompletion) {
+    payableDate = format(addDays(accrualDateObj, 7), 'yyyy-MM-dd');
+  } else if (isDeposit) {
+    const acceptanceDate = addDays(closeDateObj, 7);
+    const daysFromAcceptance = Math.round((accrualDateObj.getTime() - acceptanceDate.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysFromAcceptance <= 1) {
+      payableDate = format(acceptanceDate, 'yyyy-MM-dd');
+    } else {
+      payableDate = format(addDays(accrualDateObj, 7), 'yyyy-MM-dd');
+    }
+  } else {
+    const earlierEvents = db.prepare(`
+      SELECT COUNT(*) as count FROM revenue_events
+      WHERE deal_id = ? AND collection_date < ? AND id != ?
+    `).get(event.deal_id, accrualDate, eventId) as { count: number };
+    const isFirstPayment = earlierEvents.count === 0;
+    if (isFirstPayment) {
+      payableDate = format(addDays(closeDateObj, 7), 'yyyy-MM-dd');
+    } else {
+      payableDate = format(addDays(accrualDateObj, payoutDelayDays), 'yyyy-MM-dd');
+    }
+  }
 
   // Create commission entry
   const entryId = generateUUID();

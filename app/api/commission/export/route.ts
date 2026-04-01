@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
     await requireAuth();
     const { searchParams } = new URL(request.url);
     const payableMonth = searchParams.get('payable_month'); // Optional: filter by specific month (YYYY-MM)
+    const payableCutoff = searchParams.get('payable_cutoff'); // Optional: for Comm Sheet - only include entries with payable_date <= this date (YYYY-MM-DD)
     const status = searchParams.get('status') || 'payable,pending'; // Default to payable and pending only
 
     const { isAdmin } = await import('@/lib/utils/auth');
@@ -79,6 +80,12 @@ export async function GET(request: NextRequest) {
         params.push(payableMonth);
       }
 
+      // Comm Sheet: only include entries with payable date on or before cutoff (e.g. today)
+      if (payableCutoff) {
+        query += " AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= ?";
+        params.push(payableCutoff);
+      }
+
       query += ' ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month) ASC, br.name ASC, d.client_name ASC';
 
       const rawEntries = db.prepare(query).all(...params) as any[];
@@ -87,12 +94,36 @@ export async function GET(request: NextRequest) {
       entries = rawEntries.map(entry => {
         const serviceIsRenewal = entry.service_id && (entry.service_is_renewal === 1 || entry.service_is_renewal === true);
         const dealIsRenewal = entry.deal_is_renewal === 1 || entry.deal_is_renewal === true;
-        const isRenewal = serviceIsRenewal || dealIsRenewal;
+        const isRenewal = serviceIsRenewal || dealIsRenewal || entry.re_billing_type === 'renewal';
         const originalProposalValue = isRenewal 
           ? (entry.original_proposal_value || entry.original_deal_value || entry.deal_value || 0)
           : (entry.deal_value || 0);
         const serviceName = entry.service_name || entry.service_type || 'Service';
         const billingType = entry.billing_type || entry.re_billing_type || '';
+
+        let previousDealAmount = 0;
+        let newDealAmount = 0;
+        if (isRenewal) {
+          const storedNew = entry.commissionable_value ?? entry.deal_value ?? 0;
+          const storedPrev = entry.original_service_value ?? entry.original_deal_value;
+          const uplift = Number(entry.amount_collected ?? 0);
+          if (entry.re_billing_type === 'renewal' && uplift > 0 && storedNew > 0) {
+            const numNew = Number(storedNew);
+            if (storedPrev == null || Number(storedPrev) === numNew) {
+              previousDealAmount = Math.max(0, numNew - uplift);
+              newDealAmount = numNew;
+            } else {
+              previousDealAmount = Number(storedPrev ?? 0);
+              newDealAmount = numNew;
+            }
+          } else if (entry.service_id && (entry.original_service_value != null || entry.commissionable_value != null)) {
+            previousDealAmount = Number(entry.original_service_value ?? 0);
+            newDealAmount = Number(entry.commissionable_value ?? 0);
+          } else {
+            previousDealAmount = Number(entry.original_deal_value ?? 0);
+            newDealAmount = Number(entry.deal_value ?? 0);
+          }
+        }
         
         return {
           id: entry.id,
@@ -112,6 +143,8 @@ export async function GET(request: NextRequest) {
           deal_value: entry.deal_value || 0,
           original_proposal_value: originalProposalValue,
           is_renewal: isRenewal,
+          previous_deal_amount: previousDealAmount,
+          new_deal_amount: newDealAmount,
           payout_months: entry.payout_months || 12,
           amount_collected: entry.amount_collected ?? 0,
           collection_date: entry.collection_date || '',
@@ -156,7 +189,9 @@ export async function GET(request: NextRequest) {
             deal_services(
               service_name,
               billing_type,
-              is_renewal
+              is_renewal,
+              original_service_value,
+              commissionable_value
             )
           )
         `)
@@ -182,11 +217,35 @@ export async function GET(request: NextRequest) {
         const billingType = serviceObj?.billing_type || revenueEvent?.billing_type || '';
         const serviceIsRenewal = serviceObj?.is_renewal === true;
         const dealIsRenewal = entry.deals?.is_renewal || false;
-        const isRenewal = serviceIsRenewal || dealIsRenewal;
+        const isRenewal = serviceIsRenewal || dealIsRenewal || revenueEvent?.billing_type === 'renewal';
         
         let originalProposalValue = entry.deals?.deal_value || 0;
         if (isRenewal) {
           originalProposalValue = entry.deals?.original_deal_value ?? entry.deals?.deal_value ?? 0;
+        }
+
+        let previousDealAmount = 0;
+        let newDealAmount = 0;
+        if (isRenewal) {
+          const storedNew = serviceObj?.commissionable_value ?? entry.deals?.deal_value ?? 0;
+          const storedPrev = serviceObj?.original_service_value ?? entry.deals?.original_deal_value;
+          const uplift = Number(revenueEvent?.amount_collected ?? 0);
+          if (revenueEvent?.billing_type === 'renewal' && uplift > 0 && storedNew > 0) {
+            const numNew = Number(storedNew);
+            if (storedPrev == null || Number(storedPrev) === numNew) {
+              previousDealAmount = Math.max(0, numNew - uplift);
+              newDealAmount = numNew;
+            } else {
+              previousDealAmount = Number(storedPrev ?? 0);
+              newDealAmount = numNew;
+            }
+          } else if (serviceObj && (serviceObj.original_service_value != null || serviceObj.commissionable_value != null)) {
+            previousDealAmount = Number(serviceObj.original_service_value ?? 0);
+            newDealAmount = Number(serviceObj.commissionable_value ?? 0);
+          } else {
+            previousDealAmount = Number(entry.deals?.original_deal_value ?? 0);
+            newDealAmount = Number(entry.deals?.deal_value ?? 0);
+          }
         }
         
         return {
@@ -207,6 +266,8 @@ export async function GET(request: NextRequest) {
           deal_value: entry.deals?.deal_value || 0,
           original_proposal_value: originalProposalValue,
           is_renewal: isRenewal,
+          previous_deal_amount: previousDealAmount,
+          new_deal_amount: newDealAmount,
           payout_months: entry.deals?.payout_months || 12,
           amount_collected: revenueEvent?.amount_collected ?? 0,
           collection_date: revenueEvent?.collection_date || '',
@@ -227,6 +288,16 @@ export async function GET(request: NextRequest) {
                 ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
                 : null;
           return entryMonth === payableMonth;
+        });
+      }
+
+      // Comm Sheet: only include entries with payable date on or before cutoff (e.g. today)
+      if (payableCutoff) {
+        allEntries = allEntries.filter(entry => {
+          const effectiveDate = entry.payable_date
+            || entry.accrual_date
+            || (entry.month ? (typeof entry.month === 'string' ? entry.month + '-01' : String(entry.month) + '-01') : null);
+          return effectiveDate && effectiveDate <= payableCutoff;
         });
       }
 
@@ -300,16 +371,18 @@ export async function GET(request: NextRequest) {
     XLSX.utils.book_append_sheet(workbook, summarySheet, 'Monthly Summary');
 
     // Create Service Commission Detail sheet - one row per commission entry (each billed service payment)
-    // Shows: each service, bill amount for that period, commission earned, renewal status
+    // Shows: each service, amount claimed on (money expected in account), commission earned, renewal status
     const detailHeaders = [
       'Client Name',
       'BDR Name',
       'Service Name',
       'Billing Type',
-      'Payable Period',
-      'Bill Amount (This Period)',
+      'Payable Date',
+      'Amount claimed on',
       'Commission (This Period)',
-      'Is Renewal',
+      'Is renewal',
+      'Previous deal amount',
+      'New deal amount',
       'Close Date',
       'Deal Value',
       'Status',
@@ -326,30 +399,53 @@ export async function GET(request: NextRequest) {
         return (a.service_name || '').localeCompare(b.service_name || '');
       })
       .forEach(entry => {
-        const entryPayableMonth = entry.payable_date
-          ? entry.payable_date.substring(0, 7)
-          : entry.accrual_date
-            ? entry.accrual_date.substring(0, 7)
-            : entry.month
-              ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : String(entry.month || '').substring(0, 7))
-              : '';
+        // Payable date: use stored payable_date, else derive from close_date + 7 days
+        let payableDate = entry.payable_date || entry.accrual_date || '';
+        if (!payableDate && entry.close_date) {
+          const d = new Date(entry.close_date);
+          d.setDate(d.getDate() + 7);
+          payableDate = d.toISOString().split('T')[0];
+        }
         const billAmount = Number(entry.amount_collected ?? 0);
         const commissionAmount = Number(entry.amount ?? 0);
         
+        const prevAmount = Number(entry.previous_deal_amount ?? 0);
+        const newAmount = Number(entry.new_deal_amount ?? 0);
         detailData.push([
           entry.client_name || '',
           entry.bdr_name || '',
           entry.service_name || entry.service_type || 'Service',
           entry.billing_type || '',
-          entryPayableMonth || '',
+          payableDate || '',
           billAmount > 0 ? billAmount.toFixed(2) : '',
           commissionAmount.toFixed(2),
           entry.is_renewal ? 'Yes' : 'No',
+          entry.is_renewal && prevAmount > 0 ? prevAmount.toFixed(2) : '',
+          entry.is_renewal && newAmount > 0 ? newAmount.toFixed(2) : '',
           entry.close_date || '',
           Number(entry.deal_value || 0).toFixed(2),
           entry.status || '',
         ]);
       });
+
+    // Add total row to Service Commission Detail sheet (Commission column is index 6)
+    const detailTotal = entries.reduce((sum, e) => sum + Number(e.amount ?? 0), 0);
+    detailData.push([]);
+    detailData.push([
+      'TOTAL',
+      '',
+      '',
+      '',
+      '',
+      '',
+      detailTotal.toFixed(2),
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+    ]);
 
     const detailSheet = XLSX.utils.aoa_to_sheet(detailData);
     const detailColWidths = [
@@ -357,10 +453,12 @@ export async function GET(request: NextRequest) {
       { wch: 20 }, // BDR Name
       { wch: 25 }, // Service Name
       { wch: 14 }, // Billing Type
-      { wch: 12 }, // Payable Period
-      { wch: 22 }, // Bill Amount (This Period)
+      { wch: 12 }, // Payable Date
+      { wch: 18 }, // Amount claimed on
       { wch: 22 }, // Commission (This Period)
-      { wch: 10 }, // Is Renewal
+      { wch: 10 }, // Is renewal
+      { wch: 18 }, // Previous deal amount
+      { wch: 16 }, // New deal amount
       { wch: 12 }, // Close Date
       { wch: 12 }, // Deal Value
       { wch: 10 }, // Status
@@ -374,9 +472,14 @@ export async function GET(request: NextRequest) {
 
     // Generate filename with date
     const dateStr = new Date().toISOString().split('T')[0];
-    const filename = payableMonth
-      ? `commissions-${payableMonth}-${dateStr}.xlsx`
-      : `commissions-all-${dateStr}.xlsx`;
+    let filename: string;
+    if (payableCutoff && payableMonth) {
+      filename = `comm-sheet-${payableMonth}-as-of-${payableCutoff}.xlsx`;
+    } else if (payableMonth) {
+      filename = `commissions-${payableMonth}-${dateStr}.xlsx`;
+    } else {
+      filename = `commissions-all-${dateStr}.xlsx`;
+    }
 
     // Return Excel file
     return new Response(excelBuffer, {

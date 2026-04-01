@@ -2,21 +2,21 @@
 
 import { memo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { TrendingUp, DollarSign, Clock, Calendar } from 'lucide-react';
+import { TrendingUp, DollarSign, Clock, PiggyBank } from 'lucide-react';
 
-interface DashboardStatsProps {
+interface DashboardStatsGridProps {
   closedDeals: number;
   commissionEarned: number;
   commissionPending: number;
-  nextMonthPayout: number;
+  commissionAccruedThisMonth?: number;
 }
 
-export const DashboardStats = memo(function DashboardStats({
+export const DashboardStatsGrid = memo(function DashboardStatsGrid({
   closedDeals,
   commissionEarned,
   commissionPending,
-  nextMonthPayout,
-}: DashboardStatsProps) {
+  commissionAccruedThisMonth = 0,
+}: DashboardStatsGridProps) {
   const stats = [
     {
       name: 'Closed Deals',
@@ -40,9 +40,9 @@ export const DashboardStats = memo(function DashboardStats({
       bgColor: 'bg-yellow-100',
     },
     {
-      name: 'Next Month Payout',
-      value: `$${nextMonthPayout.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      icon: Calendar,
+      name: 'Accrued This Month',
+      value: `$${commissionAccruedThisMonth.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      icon: PiggyBank,
       color: 'text-purple-600',
       bgColor: 'bg-purple-100',
     },
@@ -71,5 +71,3 @@ export const DashboardStats = memo(function DashboardStats({
     </div>
   );
 });
-
-

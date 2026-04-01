@@ -2,18 +2,31 @@
 
 import { useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ProgressBar } from '@tremor/react';
 
 interface TargetProgress {
   title: string;
   revenueCollected: number;
   target: number;
   achievedPercent: number;
+  newBusinessCollected?: number;
+  renewalUpliftCollected?: number;
+  daysElapsed?: number;
+  daysRemaining?: number;
 }
 
 interface TargetProgressChartProps {
   quarterly?: TargetProgress;
   annual?: TargetProgress;
   bhag?: TargetProgress;
+}
+
+function getProgressColor(percent: number): 'emerald' | 'green' | 'yellow' | 'amber' | 'red' {
+  if (percent >= 100) return 'emerald';
+  if (percent >= 75) return 'green';
+  if (percent >= 50) return 'yellow';
+  if (percent >= 25) return 'amber';
+  return 'red';
 }
 
 export function TargetProgressChart({
@@ -27,8 +40,10 @@ export function TargetProgressChart({
       collected: number;
       target: number;
       percent: number;
-      color: string;
-      bgColor: string;
+      newBusinessCollected?: number;
+      renewalUpliftCollected?: number;
+      daysElapsed?: number;
+      daysRemaining?: number;
     }> = [];
 
     if (quarterly) {
@@ -37,8 +52,8 @@ export function TargetProgressChart({
         collected: quarterly.revenueCollected,
         target: quarterly.target,
         percent: quarterly.achievedPercent,
-        color: 'text-blue-600',
-        bgColor: 'bg-blue-500',
+        newBusinessCollected: quarterly.newBusinessCollected,
+        renewalUpliftCollected: quarterly.renewalUpliftCollected,
       });
     }
 
@@ -48,8 +63,10 @@ export function TargetProgressChart({
         collected: annual.revenueCollected,
         target: annual.target,
         percent: annual.achievedPercent,
-        color: 'text-green-600',
-        bgColor: 'bg-green-500',
+        newBusinessCollected: annual.newBusinessCollected,
+        renewalUpliftCollected: annual.renewalUpliftCollected,
+        daysElapsed: annual.daysElapsed,
+        daysRemaining: annual.daysRemaining,
       });
     }
 
@@ -59,8 +76,10 @@ export function TargetProgressChart({
         collected: bhag.revenueCollected,
         target: bhag.target,
         percent: bhag.achievedPercent,
-        color: 'text-purple-600',
-        bgColor: 'bg-purple-500',
+        newBusinessCollected: bhag.newBusinessCollected,
+        renewalUpliftCollected: bhag.renewalUpliftCollected,
+        daysElapsed: bhag.daysElapsed,
+        daysRemaining: bhag.daysRemaining,
       });
     }
 
@@ -71,14 +90,6 @@ export function TargetProgressChart({
     return null;
   }
 
-  const getProgressColor = (percent: number) => {
-    if (percent >= 100) return 'bg-green-500';
-    if (percent >= 75) return 'bg-green-400';
-    if (percent >= 50) return 'bg-yellow-500';
-    if (percent >= 25) return 'bg-yellow-400';
-    return 'bg-red-500';
-  };
-
   const getStatusText = (percent: number) => {
     if (percent >= 100) return { text: 'Target Achieved!', color: 'text-green-600' };
     if (percent >= 75) return { text: 'On Track', color: 'text-green-600' };
@@ -87,16 +98,18 @@ export function TargetProgressChart({
     return { text: 'Needs Attention', color: 'text-red-600' };
   };
 
-  // Check if annual and BHAG are both present (they track the same revenue)
   const hasBothAnnualTargets = annual && bhag;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Target Progress Overview</CardTitle>
+        <p className="text-sm text-muted-foreground mt-2">
+          All goals are based on actual cash collected: new business uses full amount claimed; renewals use uplift amount only.
+        </p>
         {hasBothAnnualTargets && (
-          <p className="text-sm text-muted-foreground mt-2">
-            Note: Annual Target and BHAG both track the same annual revenue collected, but with different target amounts.
+          <p className="text-sm text-muted-foreground mt-1">
+            Note: Annual Target and BHAG both track the same annual cash collected, but with different target amounts.
           </p>
         )}
       </CardHeader>
@@ -108,6 +121,11 @@ export function TargetProgressChart({
             const status = getStatusText(target.percent);
             const progressColor = getProgressColor(target.percent);
 
+            // Time-based pacing for annual targets
+            const totalDays = (target.daysElapsed ?? 0) + (target.daysRemaining ?? 0);
+            const timeElapsedPercent = totalDays > 0 ? (target.daysElapsed ?? 0) / totalDays * 100 : 0;
+            const onTrack = totalDays > 0 && progressPercent >= timeElapsedPercent * 0.9;
+
             return (
               <div key={target.title} className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -117,43 +135,17 @@ export function TargetProgressChart({
                   </span>
                 </div>
 
-                {/* Circular Progress Indicator */}
-                <div className="relative w-32 h-32 mx-auto">
-                  <svg className="transform -rotate-90 w-32 h-32">
-                    <circle
-                      cx="64"
-                      cy="64"
-                      r="56"
-                      stroke="currentColor"
-                      strokeWidth="8"
-                      fill="none"
-                      className="text-gray-200"
-                    />
-                    <circle
-                      cx="64"
-                      cy="64"
-                      r="56"
-                      stroke="currentColor"
-                      strokeWidth="8"
-                      fill="none"
-                      strokeDasharray={`${2 * Math.PI * 56}`}
-                      strokeDashoffset={`${2 * Math.PI * 56 * (1 - progressPercent / 100)}`}
-                      strokeLinecap="round"
-                      className={progressColor.replace('bg-', 'text-')}
-                      style={{ transition: 'stroke-dashoffset 0.5s ease-in-out' }}
-                    />
-                  </svg>
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-center">
-                      <div className="text-2xl font-bold">{progressPercent.toFixed(0)}%</div>
-                    </div>
-                  </div>
-                </div>
+                <ProgressBar
+                  value={progressPercent}
+                  color={progressColor}
+                  showAnimation
+                  className="mt-2"
+                />
+                <div className="text-center text-2xl font-bold">{progressPercent.toFixed(0)}%</div>
 
-                {/* Revenue Details */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
-                    <span className="text-sm text-muted-foreground">Collected</span>
+                    <span className="text-sm text-muted-foreground">Cash Collected</span>
                     <span className="text-sm font-semibold">
                       ${target.collected.toLocaleString('en-US', {
                         minimumFractionDigits: 0,
@@ -161,6 +153,22 @@ export function TargetProgressChart({
                       })}
                     </span>
                   </div>
+                  {(target.newBusinessCollected != null || target.renewalUpliftCollected != null) && (
+                    <div className="space-y-1 pl-2 border-l-2 border-muted">
+                      {target.newBusinessCollected != null && target.newBusinessCollected > 0 && (
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-muted-foreground">New business</span>
+                          <span>${target.newBusinessCollected.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+                        </div>
+                      )}
+                      {target.renewalUpliftCollected != null && target.renewalUpliftCollected > 0 && (
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-muted-foreground">Renewal uplift</span>
+                          <span>${target.renewalUpliftCollected.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-muted-foreground">Target</span>
                     <span className="text-sm font-semibold">
@@ -179,6 +187,25 @@ export function TargetProgressChart({
                           maximumFractionDigits: 0,
                         })}
                       </span>
+                    </div>
+                  )}
+                  {target.daysElapsed != null && target.daysRemaining != null && totalDays > 0 && (
+                    <div className="pt-2 border-t">
+                      <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                        <span>Time Progress</span>
+                        <span>Day {target.daysElapsed} of {totalDays}</span>
+                      </div>
+                      <div className="w-full bg-secondary rounded-full h-2">
+                        <div
+                          className="h-2 rounded-full bg-blue-400 transition-all"
+                          style={{ width: `${timeElapsedPercent}%` }}
+                        />
+                      </div>
+                      {onTrack ? (
+                        <div className="text-xs text-green-600 mt-1">On track</div>
+                      ) : (
+                        <div className="text-xs text-yellow-600 mt-1">Behind pace</div>
+                      )}
                     </div>
                   )}
                 </div>
