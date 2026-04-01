@@ -1,9 +1,43 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, requireAuth } from '@/lib/utils/api-helpers';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+function toDateCell(value?: string): Date | '' {
+  if (!value) return '';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : d;
+}
+
+function applyNumFmt(
+  sheet: XLSX.WorkSheet,
+  options: { currencyCols?: number[]; integerCols?: number[]; dateCols?: number[] }
+) {
+  const ref = sheet['!ref'];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  const currencyCols = new Set(options.currencyCols || []);
+  const integerCols = new Set(options.integerCols || []);
+  const dateCols = new Set(options.dateCols || []);
+
+  for (let r = range.s.r + 1; r <= range.e.r; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr];
+      if (!cell) continue;
+
+      if (currencyCols.has(c) && typeof cell.v === 'number') {
+        cell.s = { ...(cell.s || {}), numFmt: '$#,##0.00' };
+      } else if (integerCols.has(c) && typeof cell.v === 'number') {
+        cell.s = { ...(cell.s || {}), numFmt: '#,##0' };
+      } else if (dateCols.has(c) && cell.v instanceof Date) {
+        cell.s = { ...(cell.s || {}), numFmt: 'yyyy-mm-dd' };
+      }
+    }
+  }
+}
 
 /**
  * Export commission breakdown for finance approval
@@ -350,7 +384,7 @@ export async function GET(request: NextRequest) {
       .forEach(monthData => {
         summaryData.push([
           monthData.month,
-          monthData.totalAmount.toFixed(2),
+          monthData.totalAmount,
           monthData.entryCount,
           Array.from(monthData.bdrBreakdown.entries())
             .map(([name, amount]) => `${name}: $${amount.toFixed(2)}`)
@@ -361,13 +395,14 @@ export async function GET(request: NextRequest) {
     // Add total row
     const grandTotal = entries.reduce((sum, e) => sum + Number(e.amount), 0);
     summaryData.push([]);
-    summaryData.push(['GRAND TOTAL', grandTotal.toFixed(2), entries.length, '']);
+    summaryData.push(['GRAND TOTAL', grandTotal, entries.length, '']);
 
     // Create workbook
     const workbook = XLSX.utils.book_new();
     
     // Add summary sheet
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+    applyNumFmt(summarySheet, { currencyCols: [1], integerCols: [2] });
     XLSX.utils.book_append_sheet(workbook, summarySheet, 'Monthly Summary');
 
     // Create Service Commission Detail sheet - one row per commission entry (each billed service payment)
@@ -388,7 +423,7 @@ export async function GET(request: NextRequest) {
       'Status',
     ];
 
-    const detailData: any[] = [detailHeaders];
+    const detailData: Array<Array<string | number | Date | null>> = [detailHeaders];
 
     entries
       .sort((a, b) => {
@@ -416,14 +451,14 @@ export async function GET(request: NextRequest) {
           entry.bdr_name || '',
           entry.service_name || entry.service_type || 'Service',
           entry.billing_type || '',
-          payableDate || '',
-          billAmount > 0 ? billAmount.toFixed(2) : '',
-          commissionAmount.toFixed(2),
+          toDateCell(payableDate),
+          billAmount > 0 ? billAmount : null,
+          commissionAmount,
           entry.is_renewal ? 'Yes' : 'No',
-          entry.is_renewal && prevAmount > 0 ? prevAmount.toFixed(2) : '',
-          entry.is_renewal && newAmount > 0 ? newAmount.toFixed(2) : '',
-          entry.close_date || '',
-          Number(entry.deal_value || 0).toFixed(2),
+          entry.is_renewal && prevAmount > 0 ? prevAmount : null,
+          entry.is_renewal && newAmount > 0 ? newAmount : null,
+          toDateCell(entry.close_date || ''),
+          Number(entry.deal_value || 0),
           entry.status || '',
         ]);
       });
@@ -438,7 +473,7 @@ export async function GET(request: NextRequest) {
       '',
       '',
       '',
-      detailTotal.toFixed(2),
+      detailTotal,
       '',
       '',
       '',
@@ -464,6 +499,7 @@ export async function GET(request: NextRequest) {
       { wch: 10 }, // Status
     ];
     detailSheet['!cols'] = detailColWidths;
+    applyNumFmt(detailSheet, { currencyCols: [5, 6, 8, 9, 11], dateCols: [4, 10] });
     
     XLSX.utils.book_append_sheet(workbook, detailSheet, 'Service Commission Detail');
 

@@ -25,6 +25,39 @@ interface ExportRow {
   final_invoiced_amount: string;
 }
 
+function toDateCell(value?: string): Date | '' {
+  if (!value) return '';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : d;
+}
+
+function toNum(value?: string): number | null {
+  if (value == null || value === '') return null;
+  const n = Number.parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyBatchReportNumFmt(worksheet: XLSX.WorkSheet) {
+  const ref = worksheet['!ref'];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  const currencyCols = new Set([3, 5, 6, 8, 9, 10]); // D,F,G,I,J,K
+  const dateCols = new Set([2]); // C
+  for (let r = range.s.r + 1; r <= range.e.r; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = worksheet[addr];
+      if (!cell) continue;
+      if (currencyCols.has(c) && typeof cell.v === 'number') {
+        cell.s = { ...(cell.s || {}), numFmt: '$#,##0.00' };
+      }
+      if (dateCols.has(c) && cell.v instanceof Date) {
+        cell.s = { ...(cell.s || {}), numFmt: 'yyyy-mm-dd' };
+      }
+    }
+  }
+}
+
 function groupRowsByPayableMonth(rows: ExportRow[]) {
   const getPayableMonth = (r: ExportRow) => (r.payable_date || '').toString().substring(0, 7);
   const rowsByMonth: Record<string, ExportRow[]> = {};
@@ -127,7 +160,7 @@ export async function GET(
       const { rowsByMonth, sortedMonths, formatMonthHeading } = groupRowsByPayableMonth(rows);
 
       if (format === 'xlsx') {
-        const worksheetData: (string | number)[][] = [headers];
+        const worksheetData: Array<Array<string | number | Date | null>> = [headers];
         const rowTypes: ReportExcelRowType[] = ['header'];
         for (const month of sortedMonths) {
           const monthRows = rowsByMonth[month];
@@ -138,25 +171,26 @@ export async function GET(
             worksheetData.push([
               r.client_name,
               r.deal,
-              r.payable_date,
-              r.amount_claimed_on,
+              toDateCell(r.payable_date),
+              toNum(r.amount_claimed_on),
               r.is_renewal,
-              r.previous_deal_amount,
-              r.new_deal_amount,
+              toNum(r.previous_deal_amount),
+              toNum(r.new_deal_amount),
               r.commission_pct,
-              r.original_commission,
-              r.override_amount,
-              r.final_invoiced_amount,
+              toNum(r.original_commission),
+              toNum(r.override_amount),
+              toNum(r.final_invoiced_amount),
             ]);
             rowTypes.push('data');
           }
         }
         worksheetData.push([]);
         rowTypes.push('blank');
-        worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)]);
+        worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission]);
         rowTypes.push('total');
         const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
         applyReportExcelStyles(worksheet, rowTypes);
+        applyBatchReportNumFmt(worksheet);
         worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Commission Report');
@@ -288,7 +322,7 @@ export async function GET(
     const { rowsByMonth, sortedMonths, formatMonthHeading } = groupRowsByPayableMonth(rows as ExportRow[]);
 
     if (format === 'xlsx') {
-      const worksheetData: (string | number)[][] = [headers];
+      const worksheetData: Array<Array<string | number | Date | null>> = [headers];
       const rowTypes: ReportExcelRowType[] = ['header'];
       for (const month of sortedMonths) {
         const monthRows = rowsByMonth[month];
@@ -299,25 +333,26 @@ export async function GET(
           worksheetData.push([
             r.client_name,
             r.deal,
-            r.payable_date,
-            r.amount_claimed_on,
+            toDateCell(r.payable_date),
+            toNum(r.amount_claimed_on),
             r.is_renewal,
-            r.previous_deal_amount,
-            r.new_deal_amount,
+            toNum(r.previous_deal_amount),
+            toNum(r.new_deal_amount),
             r.commission_pct,
-            r.original_commission,
-            r.override_amount,
-            r.final_invoiced_amount,
+            toNum(r.original_commission),
+            toNum(r.override_amount),
+            toNum(r.final_invoiced_amount),
           ]);
           rowTypes.push('data');
         }
       }
       worksheetData.push([]);
       rowTypes.push('blank');
-      worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)]);
+      worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission]);
       rowTypes.push('total');
       const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
       applyReportExcelStyles(worksheet, rowTypes);
+      applyBatchReportNumFmt(worksheet);
       worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Commission Report');
