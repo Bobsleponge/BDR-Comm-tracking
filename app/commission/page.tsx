@@ -95,15 +95,15 @@ export default function CommissionPage() {
 
   const monthLabelWithApproval = (monthStr: string) => {
     const base = formatMonthLabel(monthStr);
-    const rows = breakdown?.breakdown as Array<{ month: string; entries?: Array<{ isApproved?: boolean; amount: number }> }> | undefined;
+    const rows = breakdown?.breakdown as
+      | Array<{ month: string; entries?: Array<{ isApproved?: boolean; status?: string; amount: number }> }>
+      | undefined;
     const row = rows?.find((m) => m.month === monthStr);
     if (!row?.entries?.length) return base;
-    const approved = row.entries
-      .filter((e) => e.isApproved === true)
-      .reduce((s, e) => s + Number(e.amount ?? 0), 0);
-    const left = row.entries
-      .filter((e) => e.isApproved !== true)
-      .reduce((s, e) => s + Number(e.amount ?? 0), 0);
+    const settled = (e: { isApproved?: boolean; status?: string; amount: number }) =>
+      e.status === 'paid' || e.isApproved === true;
+    const approved = row.entries.filter(settled).reduce((s, e) => s + Number(e.amount ?? 0), 0);
+    const left = row.entries.filter((e) => !settled(e)).reduce((s, e) => s + Number(e.amount ?? 0), 0);
     return `${base} · $${formatMoneyShort(approved)} approved · $${formatMoneyShort(left)} left`;
   };
 
@@ -120,8 +120,8 @@ export default function CommissionPage() {
   // Use SWR for data fetching with automatic caching and revalidation
 
   const entriesUrl = selectedMonth && selectedMonth !== 'all'
-    ? `/api/commission/entries?payable_month=${selectedMonth}`
-    : '/api/commission/entries';
+    ? `/api/commission/entries?payable_month=${selectedMonth}&include_report_adjustments=1`
+    : '/api/commission/entries?include_report_adjustments=1';
   
   const breakdownParams = new URLSearchParams();
   if (filters.serviceType) breakdownParams.append('service_type', filters.serviceType);
@@ -130,22 +130,22 @@ export default function CommissionPage() {
 
   // Prioritize summary first (fastest, most important)
   const { data: summaryData, error: summaryError, mutate: mutateSummary } = useSWR('/api/commission/summary', fetcher, {
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false, // Don't refetch on reconnect - user can refresh if needed
-    dedupingInterval: 60000, // Increased dedupe interval to 60 seconds
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: 0,
   });
 
   // Load entries and breakdown in parallel but with lower priority
   const { data: entriesData, error: entriesError, mutate: mutateEntries } = useSWR(entriesUrl, fetcher, {
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false,
-    dedupingInterval: 60000,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: 0,
   });
 
   const { data: breakdownData, error: breakdownError, mutate: mutateBreakdown } = useSWR(breakdownUrl, fetcher, {
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false,
-    dedupingInterval: 60000,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: 0,
   });
 
   const { data: batchesData, mutate: mutateBatches } = useSWR('/api/commission/batches', fetcher, {

@@ -1,0 +1,7 @@
+BDR test-bdr-id 2026-Q1
+Lines moving to Q2 (bonus): 4
+
+7ca516cb-80b6-46db-9827-bc6e4c46581b	ATC Fisherman	Bookkeeping	2026-03-13	500.00	12.50	accrued	comm_excel=false
+46008d0f-b4d3-4715-be61-8f158bc95c34	Stephen Oliver	1040	2026-03-14	1500.00	37.50	paid	comm_excel=true
+5672c5a5-7b67-4ba2-bb50-b186256a348e	Jane Rose	Scorp and 1040	2026-03-17	1000.00	25.00	accrued	comm_excel=false
+be2a7f5e-394b-4354-ad62-ddc522ced037	Denise Ecuyer	S-corp and tax	2026-03-27	2875.00	71.88	accrued	comm_excel=false

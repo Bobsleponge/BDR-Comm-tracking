@@ -4,13 +4,17 @@
   "private": true,
   "scripts": {
     "dev": "node scripts/show-local-ip.js && next dev -p 3000 -H 0.0.0.0",
+    "servers": "node scripts/show-local-ip.js && next dev -p 3000 -H 0.0.0.0",
     "dev:turbo": "next dev -p 3000 -H 0.0.0.0 --turbo",
     "build": "next build",
     "start": "next start -H 0.0.0.0",
     "lint": "next lint",
     "test": "vitest",
     "test:watch": "vitest --watch",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "sync-approved": "tsx scripts/sync-approved-from-reports.ts",
+    "mark-paid-from-excel": "tsx scripts/mark-paid-from-excel-reports.ts",
+    "mark-paid-commission-excel": "COMMISSION_ONLY=1 tsx scripts/mark-paid-from-excel-reports.ts"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.9",

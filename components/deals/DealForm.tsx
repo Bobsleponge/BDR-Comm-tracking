@@ -67,18 +67,39 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
 
   const [services, setServices] = useState<any[]>(initialData?.deal_services || []);
 
-  const fetchClients = useCallback(async (bypassCache = false) => {
+  const fetchClients = useCallback(async (bypassCache = false, ensure?: Client) => {
     try {
-      const res = await fetch('/api/clients?limit=1000', {
+      const res = await fetch('/api/clients?limit=2000', {
         cache: bypassCache ? 'no-store' : 'default',
         credentials: 'include',
+        headers: bypassCache
+          ? { 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+          : undefined,
       });
       if (res.ok) {
         const data = await res.json();
-        setClients(Array.isArray(data) ? data : (data.data || []));
+        let list: Client[] = Array.isArray(data) ? data : (data.data || []);
+        if (ensure && !list.some((c) => c.id === ensure.id)) {
+          list = [...list, ensure];
+        }
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setClients(list);
+      } else if (ensure) {
+        setClients((prev) =>
+          prev.some((c) => c.id === ensure.id)
+            ? prev
+            : [...prev, ensure].sort((a, b) => a.name.localeCompare(b.name))
+        );
       }
     } catch (err) {
       console.error('Failed to fetch clients:', err);
+      if (ensure) {
+        setClients((prev) =>
+          prev.some((c) => c.id === ensure.id)
+            ? prev
+            : [...prev, ensure].sort((a, b) => a.name.localeCompare(b.name))
+        );
+      }
     }
   }, []);
 
@@ -253,17 +274,17 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       if (!res.ok || data.error) {
         throw new Error(data.error || 'Failed to create client');
       }
-      const newClient = { id: data.id, name: data.name, company: data.company ?? undefined };
-      setClients(prev => {
-        if (prev.some(c => c.id === data.id)) return prev;
-        return [...prev, newClient];
-      });
+      const newClient: Client = {
+        id: data.id,
+        name: data.name,
+        company: data.company ?? undefined,
+      };
       setFormData(prev => ({
         ...prev,
-        client_id: data.id,
-        client_name: data.name,
+        client_id: newClient.id,
+        client_name: newClient.name,
       }));
-      await fetchClients(true);
+      await fetchClients(true, newClient);
       setNewClientForm({ name: '', company: '', email: '', phone: '' });
       setShowCreateClientDialog(false);
     } catch (err: any) {
@@ -444,6 +465,7 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
             <Label htmlFor="client_id">Client *</Label>
             <div className="flex gap-2">
               <Select
+                key={formData.client_id || 'no-client'}
                 value={formData.client_id || ''}
                 onValueChange={(value) => {
                   const client = clients.find(c => c.id === value);

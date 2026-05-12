@@ -1,0 +1,31 @@
+BDR: test-bdr-id
+Month filter: 2026-03
+Excel source: commission report only
+Marked paid (unique entry ids): 22
+Strict sheet reconcile (paid → payable, not on sheet): 17 ids
+
+Reverted entry ids:
+274be0cb-a98c-4c5b-b596-2665370727a9
+6b24cd75-caee-4173-9c2b-7d64d6f69cca
+5d6674bc-b67d-43bd-a358-4efeeafc8f53
+7d79b86a-71d6-402d-a455-0e811b005902
+75e522c6-8364-4035-b1fc-8508765e5806
+fa695000-b1df-48a8-a8d2-c32030073705
+87a02b1c-7459-4907-a933-c5c70ef58203
+0d068c7b-8cc7-4206-950b-0cd450b42cb3
+4edfe8d4-64c8-4635-9fd1-67c00db2c8cb
+3b82285b-4e24-49f6-bb25-dfb42b562e84
+88e24cbf-997a-4c21-9e62-b831d39f9981
+c1d86be8-adae-451c-895e-8d9ed9ab03e7
+36b5fb85-dd72-4b0f-951b-e67d75da9d7b
+6761905f-9a11-4062-997c-bfe5941a117e
+60e869a6-009b-472a-a2de-86b043b5ac26
+88d63234-192a-4eb6-9595-b4ea24d28da7
+6d6bfd26-d659-4374-b0f4-296b925ed49f
+
+Still not paid (3 lines):
+2026-03-13	ATC Fisherman	Bookkeeping	12.50	accrued
+2026-03-17	Jane Rose	Scorp and 1040	25.00	accrued
+2026-03-27	Denise Ecuyer	S-corp and tax	71.88	accrued
+
+Subtotal: 109.38

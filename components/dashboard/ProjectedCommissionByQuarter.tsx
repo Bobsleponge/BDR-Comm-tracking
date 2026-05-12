@@ -3,6 +3,7 @@
 import { memo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ProgressBar } from '@tremor/react';
+import { Button } from '@/components/ui/button';
 import {
   Tooltip,
   TooltipContent,
@@ -10,6 +11,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { RiInformationLine } from '@remixicon/react';
+import { Download } from 'lucide-react';
 
 export interface QuarterlyProgressItem {
   revenue: number;
@@ -29,13 +31,25 @@ const formatCurrency = (n: number) =>
   `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const BONUS_RATE = 0.025;
 
+function bonusReportUrl(quarter: string) {
+  const q = encodeURIComponent(quarter);
+  return `/api/dashboard/bonus-calculation-report?type=payable&quarter=${q}&format=xlsx&t=${Date.now()}`;
+}
+
 export const ProjectedCommissionByQuarter = memo(function ProjectedCommissionByQuarter({
   quarterlyProgressByQuarter = {},
   projectedCommissionByQuarter = {},
   currentQuarter = '',
 }: ProjectedCommissionByQuarterProps) {
+  const resolvedCurrentQuarter =
+    currentQuarter ||
+    (() => {
+      const now = new Date();
+      const quarter = Math.ceil((now.getMonth() + 1) / 3);
+      return `${now.getFullYear()}-Q${quarter}`;
+    })();
   const quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
-  const year = currentQuarter ? currentQuarter.split('-')[0] : new Date().getFullYear().toString();
+  const year = resolvedCurrentQuarter.split('-')[0];
 
   const rows = quarters.map((q) => {
     const key = `${year}-${q}`;
@@ -47,7 +61,7 @@ export const ProjectedCommissionByQuarter = memo(function ProjectedCommissionByQ
     const target = progress?.target ?? 75000;
     const achievedPercent = progress?.achievedPercent ?? 0;
     const estimatedPercent = target > 0 ? (estimatedRevenue / target) * 100 : 0;
-    const isCurrent = currentQuarter === key;
+    const isCurrent = resolvedCurrentQuarter === key;
     return {
       quarter: key,
       label: q,
@@ -95,6 +109,17 @@ export const ProjectedCommissionByQuarter = memo(function ProjectedCommissionByQ
                       <span className="rounded bg-primary/20 px-1 py-0.5 text-[10px] text-primary">Current</span>
                     )}
                   </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => window.open(bonusReportUrl(quarter), '_blank')}
+                    aria-label={`Download ${quarter} quarterly goal progress as Excel`}
+                  >
+                    <Download className="mr-1 h-3.5 w-3.5" />
+                    Excel
+                  </Button>
                 </div>
                 <div className="mt-2 space-y-2">
                   <div>

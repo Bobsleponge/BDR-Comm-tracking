@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
+import { normDateStr, getLocalApprovalDisplaySets, isEntryApprovedForDisplay } from '@/lib/commission/entry-approval-display';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -93,10 +94,7 @@ export async function GET(request: NextRequest) {
 
       const entries = db.prepare(query).all(...params) as any[];
 
-      // Determine which entries are approved (in paid reports via fingerprints)
-      const fingerprints = db.prepare('SELECT bdr_id, deal_id, effective_date FROM approved_commission_fingerprints').all() as Array<{ bdr_id: string; deal_id: string; effective_date: string }>;
-      const fpSet = new Set(fingerprints.map(f => `${f.bdr_id}|${f.deal_id}|${f.effective_date}`));
-      const getEffectiveDate = (e: any) => e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
+      const approvalSets = getLocalApprovalDisplaySets(db);
 
       // Fallback: for entries with no service (no revenue_event or re.service_id null), get first service per deal
       const dealIdsNeedingService = [...new Set(entries.filter((e) => !e.service_id && e.deal_id).map((e) => e.deal_id))];
@@ -163,8 +161,18 @@ export async function GET(request: NextRequest) {
           isRenewal && derivedUplift > 0
             ? derivedUplift
             : Number(entry.amount_collected ?? 0);
-        const effectiveDate = getEffectiveDate(entry);
-        const isApproved = effectiveDate && fpSet.has(`${entry.bdr_id}|${entry.ce_deal_id}|${effectiveDate}`);
+        const isApproved = isEntryApprovedForDisplay(
+          {
+            id: entry.id,
+            bdr_id: entry.bdr_id,
+            deal_id: entry.ce_deal_id,
+            status: entry.status,
+            payable_date: entry.payable_date,
+            accrual_date: entry.accrual_date,
+            month: entry.month,
+          },
+          approvalSets
+        );
         // Generate unique ID: use commission entry ID if available, otherwise use revenue_event_id for scheduled entries
         const uniqueId = entry.id || (entry.revenue_event_id ? `scheduled-${entry.revenue_event_id}` : `scheduled-${entry.deal_id}-${entry.collection_date}`);
         monthData.entries.push({
@@ -303,15 +311,42 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Approved commission fingerprints (same logic as local DB / entries API)
+    // Same approval logic as entries API: paid, batch items, normalized fingerprints (+ month fallback)
+    const { data: approvedBatchesSb } = await supabase.from('commission_batches').select('id').in('status', ['approved', 'paid']);
+    const approvedBatchIdsSb = (approvedBatchesSb || []).map((b: { id: string }) => b.id);
+    let approvedEntryIdsSb = new Set<string>();
+    if (approvedBatchIdsSb.length > 0) {
+      const { data: batchItemsSb } = await supabase
+        .from('commission_batch_items')
+        .select('commission_entry_id')
+        .in('batch_id', approvedBatchIdsSb);
+      approvedEntryIdsSb = new Set((batchItemsSb || []).map((r: { commission_entry_id: string }) => r.commission_entry_id));
+    }
+
     const bdrIdsForFp = [...new Set((filteredEntries as any[]).map((e: any) => e.bdr_id).filter(Boolean))];
     let fpSet = new Set<string>();
+    let fpMonthSet = new Set<string>();
     if (bdrIdsForFp.length > 0) {
       const { data: fpRows } = await supabase
         .from('approved_commission_fingerprints')
         .select('bdr_id, deal_id, effective_date')
         .in('bdr_id', bdrIdsForFp);
-      fpSet = new Set((fpRows || []).map((f: any) => `${f.bdr_id}|${f.deal_id}|${f.effective_date}`));
+      const rows = fpRows || [];
+      fpSet = new Set(
+        rows.map(
+          (f: { bdr_id: string; deal_id: string; effective_date: string }) =>
+            `${f.bdr_id}|${f.deal_id}|${normDateStr(f.effective_date) || f.effective_date}`
+        )
+      );
+      fpMonthSet = new Set(
+        rows
+          .map((f: { bdr_id: string; deal_id: string; effective_date: string }) => {
+            const nd = normDateStr(f.effective_date);
+            const ym = nd && nd.length >= 7 ? nd.slice(0, 7) : '';
+            return ym ? `${f.bdr_id}|${f.deal_id}|${ym}` : '';
+          })
+          .filter(Boolean)
+      );
     }
     const getEffectiveDate = (e: any) => e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
 
@@ -388,8 +423,15 @@ export async function GET(request: NextRequest) {
       const derivedUplift = isRenewal && previousDealAmount != null && newDealAmount != null && newDealAmount > previousDealAmount ? newDealAmount - previousDealAmount : 0;
       const displayAmountCollected = isRenewal && derivedUplift > 0 ? derivedUplift : Number(revenueEvent?.amount_collected ?? 0);
 
-      const effectiveDate = getEffectiveDate(entry);
-      const isApproved = !!(effectiveDate && fpSet.has(`${entry.bdr_id}|${entry.deal_id}|${effectiveDate}`));
+      const effRaw = getEffectiveDate(entry);
+      const eff = normDateStr(effRaw) || effRaw;
+      const monthKey =
+        eff && typeof eff === 'string' && eff.length >= 7 ? `${entry.bdr_id}|${entry.deal_id}|${eff.slice(0, 7)}` : '';
+      const isApproved =
+        entry.status === 'paid' ||
+        approvedEntryIdsSb.has(entry.id) ||
+        (!!eff &&
+          (fpSet.has(`${entry.bdr_id}|${entry.deal_id}|${eff}`) || (!!monthKey && fpMonthSet.has(monthKey))));
 
       monthData.entries.push({
         id: entry.id,

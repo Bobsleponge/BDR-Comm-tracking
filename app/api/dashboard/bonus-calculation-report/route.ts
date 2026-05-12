@@ -29,6 +29,8 @@ import {
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
 const QUARTER_RE = /^\d{4}-Q[1-4]$/;
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
   try {
@@ -153,6 +155,40 @@ function metaLine(meta: { quarterlyTarget: number; revenueCollectedForTarget: nu
   return `Target $${meta.quarterlyTarget.toLocaleString('en-US')} | Cash collected (quarter) $${meta.revenueCollectedForTarget.toFixed(2)} (${meta.achievedPercent.toFixed(1)}%) | Bonus eligible: ${meta.bonusEligible ? 'Yes' : 'No'}`;
 }
 
+function withNoCache(headers: Record<string, string>) {
+  return {
+    ...headers,
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+  };
+}
+
+function applyNumericFormats(
+  worksheet: XLSX.WorkSheet,
+  rowTypes: ReportExcelRowType[],
+  opts: { currencyColumns: number[]; percentColumns?: number[] }
+) {
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+  const percentColumns = new Set(opts.percentColumns || []);
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    const rowType = rowTypes[R];
+    if (rowType !== 'data' && rowType !== 'total') continue;
+    for (const col of opts.currencyColumns) {
+      const ref = XLSX.utils.encode_cell({ r: R, c: col });
+      const cell = worksheet[ref];
+      if (!cell || typeof cell.v !== 'number') continue;
+      cell.z = '$#,##0.00';
+    }
+    for (const col of percentColumns) {
+      const ref = XLSX.utils.encode_cell({ r: R, c: col });
+      const cell = worksheet[ref];
+      if (!cell || typeof cell.v !== 'number') continue;
+      cell.z = '0.00%';
+    }
+  }
+}
+
 function buildPayableResponse(
   rows: PayableBonusRow[],
   meta: {
@@ -216,29 +252,30 @@ function buildPayableResponse(
           r.deal,
           r.payable_date,
           r.collection_date,
-          r.entry_commission,
-          r.attributed_revenue,
-          r.bonus_at_2_5,
+          Number.parseFloat(r.entry_commission || '0') || 0,
+          Number.parseFloat(r.attributed_revenue || '0') || 0,
+          Number.parseFloat(r.bonus_at_2_5 || '0') || 0,
         ]);
         rowTypes.push('data');
       }
     }
     worksheetData.push([]);
     rowTypes.push('blank');
-    worksheetData.push(['TOTAL', '', '', '', '', totalAttributed.toFixed(2), totalBonus.toFixed(2)]);
+    worksheetData.push(['TOTAL', '', '', '', '', totalAttributed, totalBonus]);
     rowTypes.push('total');
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
     applyReportExcelStyles(worksheet, rowTypes);
+    applyNumericFormats(worksheet, rowTypes, { currencyColumns: [4, 5, 6] });
     worksheet['!cols'] = [{ wch: 22 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 12 }];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Quarterly Bonus');
     const buf = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
     const filename = filenameForQuarterlyBonus(quarter, type, 'xlsx');
     return new Response(buf, {
-      headers: {
+      headers: withNoCache({
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="${filename}"`,
-      },
+      }),
     });
   }
 
@@ -268,10 +305,10 @@ function buildPayableResponse(
   csvLines.push(['TOTAL', '', '', '', '', totalAttributed.toFixed(2), totalBonus.toFixed(2)].join(','));
   const filename = filenameForQuarterlyBonus(quarter, type, 'csv');
   return new Response(csvLines.join('\n'), {
-    headers: {
+    headers: withNoCache({
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${filename}"`,
-    },
+    }),
   });
 }
 
@@ -319,26 +356,36 @@ function buildClosedDealsResponse(
       worksheetData.push([`${label}: $${sub.toFixed(2)}`, ...colPad]);
       rowTypes.push('month');
       for (const r of dealRows) {
-        worksheetData.push([r.client_name, r.deal, r.is_renewal, r.base_amount, r.rate_pct, r.basis_commission]);
+        const ratePctRaw = Number.parseFloat((r.rate_pct || '').replace('%', ''));
+        const rateAsDecimal = Number.isFinite(ratePctRaw) ? ratePctRaw / 100 : 0;
+        worksheetData.push([
+          r.client_name,
+          r.deal,
+          r.is_renewal,
+          Number.parseFloat(r.base_amount || '0') || 0,
+          rateAsDecimal,
+          Number.parseFloat(r.basis_commission || '0') || 0,
+        ]);
         rowTypes.push('data');
       }
     }
     worksheetData.push([]);
     rowTypes.push('blank');
-    worksheetData.push(['TOTAL', '', '', totalBaseAmount.toFixed(2), '', totalBasisCommission.toFixed(2)]);
+    worksheetData.push(['TOTAL', '', '', totalBaseAmount, '', totalBasisCommission]);
     rowTypes.push('total');
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
     applyReportExcelStyles(worksheet, rowTypes);
+    applyNumericFormats(worksheet, rowTypes, { currencyColumns: [3, 5], percentColumns: [4] });
     worksheet['!cols'] = [{ wch: 22 }, { wch: 20 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 16 }];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Quarterly Bonus');
     const buf = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
     const filename = filenameForQuarterlyBonus(quarter, type, 'xlsx');
     return new Response(buf, {
-      headers: {
+      headers: withNoCache({
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="${filename}"`,
-      },
+      }),
     });
   }
 
@@ -365,9 +412,9 @@ function buildClosedDealsResponse(
   csvLines.push(['TOTAL', '', '', totalBaseAmount.toFixed(2), '', totalBasisCommission.toFixed(2)].join(','));
   const filename = filenameForQuarterlyBonus(quarter, type, 'csv');
   return new Response(csvLines.join('\n'), {
-    headers: {
+    headers: withNoCache({
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${filename}"`,
-    },
+    }),
   });
 }

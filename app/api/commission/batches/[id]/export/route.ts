@@ -104,7 +104,9 @@ export async function GET(
       if ((batch.status === 'approved' || batch.status === 'paid') as boolean) {
         const snapshot = db.prepare('SELECT snapshot_data FROM commission_batch_snapshots WHERE batch_id = ?').get(id) as { snapshot_data: string } | undefined;
         if (snapshot?.snapshot_data) {
-          rows = JSON.parse(snapshot.snapshot_data) as ExportRow[];
+          const parsed = JSON.parse(snapshot.snapshot_data) as Array<ExportRow & Record<string, unknown>>;
+          const { snapshotRowsToExportRows } = await import('@/lib/commission/export-rows');
+          rows = snapshotRowsToExportRows(parsed);
         } else {
           rows = [];
         }
@@ -266,7 +268,13 @@ export async function GET(
         .select('snapshot_data')
         .eq('batch_id', id)
         .single();
-      rows = snapshot?.snapshot_data ? (Array.isArray(snapshot.snapshot_data) ? snapshot.snapshot_data : (snapshot.snapshot_data as any)) : [];
+      const parsed = snapshot?.snapshot_data
+        ? Array.isArray(snapshot.snapshot_data)
+          ? snapshot.snapshot_data
+          : (snapshot.snapshot_data as any[])
+        : [];
+      const { snapshotRowsToExportRows } = await import('@/lib/commission/export-rows');
+      rows = parsed.length ? snapshotRowsToExportRows(parsed) : [];
     } else {
       const { data: batchItems } = await supabase
         .from('commission_batch_items')

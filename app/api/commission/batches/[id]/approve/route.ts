@@ -53,9 +53,12 @@ export async function POST(
         }
       }
 
-      // Snapshot report rows for immutability (survives reprocessing CASCADE)
+      // Snapshot report rows for immutability (survives reprocessing CASCADE); includes UI-only adjustment metadata (not exported to Excel)
       const snapshotItems = db.prepare(`
         SELECT
+          cbi.commission_entry_id,
+          cbi.adjustment_note,
+          cbi.updated_at as batch_item_updated_at,
           cbi.override_amount,
           cbi.override_payment_date,
           cbi.override_commission_rate,
@@ -63,7 +66,7 @@ export async function POST(
           ce.payable_date,
           ce.accrual_date,
           d.client_name,
-          d.service_type as deal_service_type,
+          d.service_type,
           d.deal_value,
           d.original_deal_value,
           d.is_renewal as deal_is_renewal,
@@ -79,11 +82,12 @@ export async function POST(
         JOIN commission_entries ce ON cbi.commission_entry_id = ce.id
         JOIN deals d ON ce.deal_id = d.id
         LEFT JOIN revenue_events re ON ce.revenue_event_id = re.id
-        LEFT JOIN deal_services ds ON re.service_id = ds.id
+        LEFT JOIN deal_services ds ON (re.service_id = ds.id OR ce.service_id = ds.id)
         WHERE cbi.batch_id = ?
+        ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01'), cbi.commission_entry_id
       `).all(id) as any[];
-      const { buildExportRows } = await import('@/lib/commission/export-rows');
-      const snapshotRows = buildExportRows(snapshotItems);
+      const { buildCommissionSnapshotRows } = await import('@/lib/commission/export-rows');
+      const snapshotRows = buildCommissionSnapshotRows(snapshotItems);
       db.prepare(`
         INSERT INTO commission_batch_snapshots (id, batch_id, snapshot_data)
         VALUES (?, ?, ?)
@@ -144,6 +148,9 @@ export async function POST(
     const { data: snapshotItems } = await supabase
       .from('commission_batch_items')
       .select(`
+        commission_entry_id,
+        adjustment_note,
+        updated_at,
         override_amount,
         override_payment_date,
         override_commission_rate,
@@ -157,9 +164,14 @@ export async function POST(
       `)
       .eq('batch_id', id);
     if (snapshotItems && snapshotItems.length > 0) {
-      const { buildExportRows, flattenSupabaseItem } = await import('@/lib/commission/export-rows');
-      const flatItems = snapshotItems.map((i: any) => flattenSupabaseItem(i));
-      const snapshotRows = buildExportRows(flatItems);
+      const { buildCommissionSnapshotRows, flattenSupabaseItem } = await import('@/lib/commission/export-rows');
+      const flatItems = snapshotItems.map((i: any) => ({
+        ...flattenSupabaseItem(i),
+        commission_entry_id: i.commission_entry_id,
+        adjustment_note: i.adjustment_note ?? null,
+        batch_item_updated_at: i.updated_at ?? null,
+      }));
+      const snapshotRows = buildCommissionSnapshotRows(flatItems);
       await supabase.from('commission_batch_snapshots').insert({
         batch_id: id,
         snapshot_data: snapshotRows,

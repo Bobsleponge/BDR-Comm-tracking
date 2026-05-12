@@ -41,19 +41,10 @@ export async function GET(
       if ((batch.status === 'approved' || batch.status === 'paid') as boolean) {
         const snapshot = db.prepare('SELECT snapshot_data FROM commission_batch_snapshots WHERE batch_id = ?').get(id) as { snapshot_data: string } | undefined;
         if (snapshot?.snapshot_data) {
-          const rows = JSON.parse(snapshot.snapshot_data) as Array<{
-            client_name: string;
-            deal: string;
-            payable_date: string;
-            amount_claimed_on: string;
-            is_renewal: string;
-            previous_deal_amount: string;
-            new_deal_amount: string;
-            commission_pct: string;
-            original_commission: string;
-            override_amount: string;
-            final_invoiced_amount: string;
-          }>;
+          const rows = JSON.parse(snapshot.snapshot_data) as Array<
+            import('@/lib/commission/export-rows').ExportRow &
+              Partial<import('@/lib/commission/export-rows').CommissionSnapshotRow>
+          >;
           const { snapshotRowsToBatchItems } = await import('@/lib/commission/export-rows');
           const items = snapshotRowsToBatchItems(rows, id);
           return apiSuccess({
@@ -63,6 +54,8 @@ export async function GET(
         }
       }
 
+      const { computeSnapshotAdjustmentFields } = await import('@/lib/commission/export-rows');
+
       const items = db.prepare(`
         SELECT 
           cbi.id,
@@ -71,6 +64,7 @@ export async function GET(
           cbi.override_payment_date,
           cbi.override_commission_rate,
           cbi.adjustment_note,
+          cbi.updated_at as cbi_updated_at,
           ce.amount,
           ce.deal_id,
           ce.payable_date,
@@ -127,6 +121,31 @@ export async function GET(
               new_deal_amount = Number(i.deal_value ?? 0);
             }
           }
+          const raw = {
+            override_amount: i.override_amount,
+            override_payment_date: i.override_payment_date,
+            override_commission_rate: i.override_commission_rate,
+            original_amount: i.amount,
+            payable_date: i.payable_date,
+            accrual_date: i.accrual_date,
+            client_name: i.client_name,
+            service_type: i.service_type,
+            deal_value: i.deal_value,
+            original_deal_value: i.original_deal_value,
+            deal_is_renewal: i.deal_is_renewal,
+            service_name: i.service_name,
+            commission_rate: i.commission_rate,
+            service_is_renewal: i.service_is_renewal,
+            original_service_value: i.original_service_value,
+            commissionable_value: i.commissionable_value,
+            re_billing_type: i.revenue_billing_type,
+            collection_date: i.collection_date,
+            amount_collected: i.amount_collected,
+            commission_entry_id: i.commission_entry_id,
+            adjustment_note: i.adjustment_note,
+            batch_item_updated_at: i.cbi_updated_at ?? null,
+          } as Parameters<typeof computeSnapshotAdjustmentFields>[0];
+          const { change_summary, is_adjusted } = computeSnapshotAdjustmentFields(raw);
           return {
             id: i.id,
             commission_entry_id: i.commission_entry_id,
@@ -150,6 +169,9 @@ export async function GET(
             accrual_date: i.accrual_date,
             month: i.month,
             deal_id: i.deal_id,
+            change_summary,
+            adjusted_at: i.cbi_updated_at ?? null,
+            is_adjusted,
           };
         }),
       }, 200, { cache: 'no-store' });
@@ -196,11 +218,14 @@ export async function GET(
       }
     }
 
+    const { computeSnapshotAdjustmentFields } = await import('@/lib/commission/export-rows');
+
     const { data: batchItems } = await supabase
       .from('commission_batch_items')
       .select(`
         id,
         commission_entry_id,
+        updated_at,
         override_amount,
         override_payment_date,
         override_commission_rate,
@@ -252,6 +277,32 @@ export async function GET(
         }
       }
 
+      const adjRaw = {
+        override_amount: item.override_amount,
+        override_payment_date: item.override_payment_date,
+        override_commission_rate: item.override_commission_rate,
+        original_amount: ceObj?.amount,
+        payable_date: ceObj?.payable_date,
+        accrual_date: ceObj?.accrual_date,
+        client_name: dealObj?.client_name,
+        service_type: dealObj?.service_type,
+        deal_value: dealObj?.deal_value,
+        original_deal_value: dealObj?.original_deal_value,
+        deal_is_renewal: dealObj?.is_renewal,
+        service_name: dsObj?.service_name,
+        commission_rate: dsObj?.commission_rate,
+        service_is_renewal: dsObj?.is_renewal,
+        original_service_value: dsObj?.original_service_value,
+        commissionable_value: dsObj?.commissionable_value,
+        re_billing_type: reObj?.billing_type,
+        collection_date: reObj?.collection_date,
+        amount_collected: reObj?.amount_collected,
+        commission_entry_id: item.commission_entry_id,
+        adjustment_note: item.adjustment_note,
+        batch_item_updated_at: item.updated_at ?? null,
+      } as Parameters<typeof computeSnapshotAdjustmentFields>[0];
+      const { change_summary, is_adjusted } = computeSnapshotAdjustmentFields(adjRaw);
+
       return {
         id: item.id,
         commission_entry_id: item.commission_entry_id,
@@ -275,6 +326,9 @@ export async function GET(
         accrual_date: ceObj?.accrual_date,
         month: ceObj?.month,
         deal_id: ceObj?.deal_id,
+        change_summary,
+        adjusted_at: item.updated_at ?? null,
+        is_adjusted,
       };
     });
 

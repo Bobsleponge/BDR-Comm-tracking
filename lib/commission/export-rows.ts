@@ -64,6 +64,160 @@ export interface BatchItemRaw {
   amount_collected?: number | null;
 }
 
+/** Batch item source row + ids/timestamps for approve-time snapshot (not exported to Excel). */
+export interface SnapshotItemInput extends BatchItemRaw {
+  commission_entry_id: string;
+  adjustment_note?: string | null;
+  /** From commission_batch_items.updated_at at approve time */
+  batch_item_updated_at?: string | null;
+}
+
+export interface CommissionSnapshotRow extends ExportRow {
+  commission_entry_id: string;
+  adjustment_note: string | null;
+  change_summary: string | null;
+  adjusted_at: string | null;
+  is_adjusted: boolean;
+}
+
+function normYyyyMmDd(s: string | null | undefined): string {
+  if (s == null || s === '') return '';
+  const t = String(s).trim();
+  return t.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : t;
+}
+
+/** Human-readable summary of overrides vs system values (UI only). */
+export function buildChangeSummary(raw: SnapshotItemInput): string {
+  const parts: string[] = [];
+  const origAmt = raw.original_amount;
+  const amtCollected = raw.amount_collected ?? 0;
+  const baseRate = raw.commission_rate != null ? Number(raw.commission_rate) : null;
+
+  if (raw.override_amount != null) {
+    const oa = Number(raw.override_amount);
+    if (origAmt != null && Math.abs(oa - Number(origAmt)) >= 0.02) {
+      parts.push(`Commission amount $${Number(origAmt).toFixed(2)} → $${oa.toFixed(2)}`);
+    } else if (origAmt == null || Math.abs(oa - Number(origAmt)) >= 0.02) {
+      parts.push(`Commission amount set to $${oa.toFixed(2)}`);
+    }
+  }
+
+  if (raw.override_commission_rate != null && raw.override_amount == null) {
+    const or = Number(raw.override_commission_rate);
+    if (baseRate != null && Math.abs(or - baseRate) >= 1e-6) {
+      parts.push(`Commission rate ${(baseRate * 100).toFixed(2)}% → ${(or * 100).toFixed(2)}%`);
+    }
+    if (amtCollected > 0 && origAmt != null) {
+      const implied = amtCollected * or;
+      if (Math.abs(implied - Number(origAmt)) >= 0.02) {
+        parts.push(`Implied commission $${Number(origAmt).toFixed(2)} → $${implied.toFixed(2)}`);
+      }
+    }
+  }
+
+  if (raw.override_payment_date) {
+    const baseline =
+      normYyyyMmDd(raw.payable_date) ||
+      normYyyyMmDd(raw.accrual_date) ||
+      normYyyyMmDd(raw.collection_date);
+    const op = normYyyyMmDd(raw.override_payment_date);
+    if (op && baseline && op !== baseline) {
+      parts.push(`Payable date ${baseline} → ${op}`);
+    } else if (op) {
+      parts.push(`Payable date ${op}`);
+    }
+  }
+
+  let summary = parts.join('; ');
+  if (!summary && (raw.override_amount != null || raw.override_payment_date || raw.override_commission_rate != null)) {
+    summary = 'Adjusted on report';
+  }
+  if (!summary && raw.adjustment_note?.trim()) {
+    summary = 'Note on report';
+  }
+  return summary;
+}
+
+export function computeSnapshotAdjustmentFields(raw: SnapshotItemInput): {
+  change_summary: string | null;
+  is_adjusted: boolean;
+} {
+  const change_summary = buildChangeSummary(raw);
+  const is_adjusted =
+    change_summary !== '' ||
+    !!raw.adjustment_note?.trim() ||
+    raw.override_amount != null ||
+    !!raw.override_payment_date ||
+    raw.override_commission_rate != null;
+  return {
+    change_summary: is_adjusted ? change_summary || 'Adjusted on report' : null,
+    is_adjusted,
+  };
+}
+
+export function buildCommissionSnapshotRows(items: SnapshotItemInput[]): CommissionSnapshotRow[] {
+  const exportRows = buildExportRows(items);
+  return exportRows.map((er, idx) => {
+    const raw = items[idx];
+    const { change_summary, is_adjusted } = computeSnapshotAdjustmentFields(raw);
+    return {
+      ...er,
+      commission_entry_id: raw.commission_entry_id,
+      adjustment_note: raw.adjustment_note ?? null,
+      change_summary,
+      adjusted_at: raw.batch_item_updated_at ?? null,
+      is_adjusted,
+    };
+  });
+}
+
+/** Strip UI-only fields before CSV/XLSX export. */
+export function snapshotRowsToExportRows(rows: Array<ExportRow | CommissionSnapshotRow>): ExportRow[] {
+  return rows.map((r) => ({
+    client_name: r.client_name,
+    deal: r.deal,
+    payable_date: r.payable_date,
+    amount_claimed_on: r.amount_claimed_on,
+    is_renewal: r.is_renewal,
+    previous_deal_amount: r.previous_deal_amount,
+    new_deal_amount: r.new_deal_amount,
+    commission_pct: r.commission_pct,
+    original_commission: r.original_commission,
+    override_amount: r.override_amount,
+    final_invoiced_amount: r.final_invoiced_amount,
+  }));
+}
+
+/** Per-entry metadata from approved report snapshots (for commission list highlighting). First matching snapshot wins. */
+export type ReportAdjustmentMeta = {
+  batch_id: string;
+  change_summary: string | null;
+  adjusted_at: string | null;
+};
+
+/** Merge snapshot row array into adjustment map by commission_entry_id (skips legacy rows without id). */
+export function mergeSnapshotsIntoAdjustmentMap(
+  snapshotRowsParsed: unknown,
+  batch_id: string,
+  into: Map<string, ReportAdjustmentMeta>
+): void {
+  if (!Array.isArray(snapshotRowsParsed)) return;
+  for (const row of snapshotRowsParsed as Array<Partial<CommissionSnapshotRow> & ExportRow>) {
+    const ceId = row.commission_entry_id;
+    if (!ceId || into.has(ceId)) continue;
+    const isAdj =
+      row.is_adjusted === true ||
+      !!(row.adjustment_note && String(row.adjustment_note).trim()) ||
+      !!(row.override_amount && String(row.override_amount).trim());
+    if (!isAdj) continue;
+    into.set(ceId, {
+      batch_id,
+      change_summary: (row.change_summary as string | null) ?? null,
+      adjusted_at: (row.adjusted_at as string | null) ?? null,
+    });
+  }
+}
+
 export function buildExportRows(items: BatchItemRaw[]): ExportRow[] {
   const out = items.map((i) => {
     const originalAmount = i.original_amount ?? 0;
@@ -185,18 +339,22 @@ export interface BatchItemDisplay {
   accrual_date: string | null;
   month: string;
   deal_id: string;
+  change_summary?: string | null;
+  adjusted_at?: string | null;
+  is_adjusted?: boolean;
 }
 
-/** Convert snapshot ExportRows to BatchItemDisplay for GET response */
-export function snapshotRowsToBatchItems(rows: ExportRow[], batchId: string): BatchItemDisplay[] {
-  return rows.map((r, idx) => ({
-    id: `snapshot-${batchId}-${idx}`,
+function exportRowToBatchItemDisplay(r: ExportRow, batchId: string, entryIdSuffix: string): BatchItemDisplay {
+  const finalRaw = parseFloat(String(r.final_invoiced_amount));
+  const amount = Number.isFinite(finalRaw) ? finalRaw : 0;
+  return {
+    id: `snapshot-${batchId}-${entryIdSuffix}`,
     commission_entry_id: '',
     override_amount: r.override_amount ? parseFloat(r.override_amount) : null,
     override_payment_date: r.payable_date || null,
     override_commission_rate: r.commission_pct ? parseFloat(r.commission_pct.replace('%', '')) / 100 : null,
     adjustment_note: null,
-    amount: parseFloat(r.final_invoiced_amount || '0'),
+    amount,
     client_name: r.client_name,
     service_type: '',
     service_name: r.deal,
@@ -212,7 +370,31 @@ export function snapshotRowsToBatchItems(rows: ExportRow[], batchId: string): Ba
     accrual_date: null,
     month: r.payable_date ? r.payable_date.slice(0, 7) : '',
     deal_id: '',
-  }));
+    is_adjusted: false,
+  };
+}
+
+/** Convert snapshot rows to BatchItemDisplay for GET response (supports legacy ExportRow-only snapshots). */
+export function snapshotRowsToBatchItems(rows: Array<ExportRow | CommissionSnapshotRow>, batchId: string): BatchItemDisplay[] {
+  return rows.map((r, idx) => {
+    const ext = r as CommissionSnapshotRow;
+    const hasMeta = typeof ext.commission_entry_id === 'string' && ext.commission_entry_id.length > 0;
+    const base = exportRowToBatchItemDisplay(r, batchId, hasMeta ? ext.commission_entry_id : String(idx));
+    if (!hasMeta) {
+      return base;
+    }
+    return {
+      ...base,
+      id: `snapshot-${batchId}-${ext.commission_entry_id}`,
+      commission_entry_id: ext.commission_entry_id,
+      adjustment_note: ext.adjustment_note ?? null,
+      override_amount: r.override_amount && r.override_amount !== '' ? parseFloat(r.override_amount) : null,
+      payable_date: r.payable_date || base.payable_date,
+      change_summary: ext.change_summary ?? null,
+      adjusted_at: ext.adjusted_at ?? null,
+      is_adjusted: ext.is_adjusted ?? false,
+    };
+  });
 }
 
 /** Flatten Supabase nested batch item to BatchItemRaw */

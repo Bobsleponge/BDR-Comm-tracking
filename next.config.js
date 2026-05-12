@@ -2,7 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   // Allow loading from local network IP when accessing from another device
-  allowedDevOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.101.252:3000', 'http://192.168.101.254:3000'],
+  allowedDevOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://192.168.101.218:3000', 'http://192.168.101.252:3000', 'http://192.168.101.254:3000'],
   // Disable dev indicators to reduce segment-explorer / manifest race conditions (see .cursor/NEXT_CACHE_INVESTIGATION.md)
   devIndicators: false,
   // Enable experimental features for better performance

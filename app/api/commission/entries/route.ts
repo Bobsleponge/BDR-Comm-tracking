@@ -1,6 +1,11 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
+import {
+  normDateStr,
+  getLocalApprovalDisplaySets,
+  isEntryApprovedForDisplay,
+} from '@/lib/commission/entry-approval-display';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -12,7 +17,8 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get('status');
     const month = searchParams.get('month');
     const payableMonth = searchParams.get('payable_month'); // Format: YYYY-MM
-    
+    const includeReportAdjustments = searchParams.get('include_report_adjustments') === '1';
+
     // Pagination parameters
     const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
     const limit = Math.min(1000, Math.max(1, parseInt(searchParams.get('limit') || '100', 10)));
@@ -90,11 +96,23 @@ export async function GET(request: NextRequest) {
 
       const entries = db.prepare(query).all(...params) as any[];
 
-      // Determine which entries are approved (in paid reports via fingerprints)
-      const fingerprints = db.prepare('SELECT bdr_id, deal_id, effective_date FROM approved_commission_fingerprints').all() as Array<{ bdr_id: string; deal_id: string; effective_date: string }>;
-      const fpSet = new Set(fingerprints.map(f => `${f.bdr_id}|${f.deal_id}|${f.effective_date}`));
-      const getEffectiveDate = (e: any) => e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
-      
+      const approvalSets = getLocalApprovalDisplaySets(db);
+
+      let adjustmentByEntryId = new Map<string, import('@/lib/commission/export-rows').ReportAdjustmentMeta>();
+      if (includeReportAdjustments) {
+        const { mergeSnapshotsIntoAdjustmentMap } = await import('@/lib/commission/export-rows');
+        const snaps = db
+          .prepare('SELECT batch_id, snapshot_data FROM commission_batch_snapshots')
+          .all() as Array<{ batch_id: string; snapshot_data: string }>;
+        for (const s of snaps) {
+          try {
+            mergeSnapshotsIntoAdjustmentMap(JSON.parse(s.snapshot_data), s.batch_id, adjustmentByEntryId);
+          } catch {
+            /* ignore malformed */
+          }
+        }
+      }
+
       // Get total count for pagination metadata
       let countQuery = `
         SELECT COUNT(*) as total
@@ -129,11 +147,23 @@ export async function GET(request: NextRequest) {
         const serviceIsRenewal = entry.deal_services_is_renewal === 1 || entry.deal_services_is_renewal === true;
         const dealIsRenewal = entry.deals_is_renewal === 1 || entry.deals_is_renewal === true;
         const isRenewal = serviceIsRenewal || dealIsRenewal;
-        const effectiveDate = getEffectiveDate(entry);
-        const isApproved = effectiveDate && fpSet.has(`${entry.bdr_id}|${entry.deal_id}|${effectiveDate}`);
+        const isApproved = isEntryApprovedForDisplay(
+          {
+            id: entry.id,
+            bdr_id: entry.bdr_id,
+            deal_id: entry.deal_id,
+            status: entry.status,
+            payable_date: entry.payable_date,
+            accrual_date: entry.accrual_date,
+            month: entry.month,
+          },
+          approvalSets
+        );
+        const reportAdj = includeReportAdjustments ? adjustmentByEntryId.get(entry.id) : undefined;
         return {
           ...entry,
           is_approved: isApproved,
+          ...(reportAdj ? { report_adjustment: reportAdj } : {}),
           is_renewal: isRenewal,
           deals: entry.deals_client_name ? {
             client_name: entry.deals_client_name,
@@ -218,6 +248,50 @@ export async function GET(request: NextRequest) {
       return apiError(error.message || 'Failed to fetch commission entries', 500);
     }
 
+    const { data: approvedBatches } = await supabase.from('commission_batches').select('id').in('status', ['approved', 'paid']);
+    const approvedBatchIds = (approvedBatches || []).map((b: { id: string }) => b.id);
+    let approvedEntryIdsSupa = new Set<string>();
+    if (approvedBatchIds.length > 0) {
+      const { data: batchItems } = await supabase
+        .from('commission_batch_items')
+        .select('commission_entry_id')
+        .in('batch_id', approvedBatchIds);
+      approvedEntryIdsSupa = new Set((batchItems || []).map((r: { commission_entry_id: string }) => r.commission_entry_id));
+    }
+    let adjustmentByEntryIdSupa = new Map<string, import('@/lib/commission/export-rows').ReportAdjustmentMeta>();
+    if (includeReportAdjustments) {
+      const { mergeSnapshotsIntoAdjustmentMap } = await import('@/lib/commission/export-rows');
+      const { data: snaps } = await supabase.from('commission_batch_snapshots').select('batch_id, snapshot_data');
+      for (const s of snaps || []) {
+        let rowsParsed: unknown = (s as { snapshot_data: unknown }).snapshot_data;
+        if (typeof rowsParsed === 'string') {
+          try {
+            rowsParsed = JSON.parse(rowsParsed);
+          } catch {
+            continue;
+          }
+        }
+        mergeSnapshotsIntoAdjustmentMap(rowsParsed, (s as { batch_id: string }).batch_id, adjustmentByEntryIdSupa);
+      }
+    }
+
+    const { data: fpsSupa } = await supabase.from('approved_commission_fingerprints').select('bdr_id, deal_id, effective_date');
+    const fpSetSupa = new Set(
+      (fpsSupa || []).map(
+        (f: { bdr_id: string; deal_id: string; effective_date: string }) =>
+          `${f.bdr_id}|${f.deal_id}|${normDateStr(f.effective_date) || f.effective_date}`
+      )
+    );
+    const fpMonthSetSupa = new Set(
+      (fpsSupa || [])
+        .map((f: { bdr_id: string; deal_id: string; effective_date: string }) => {
+          const nd = normDateStr(f.effective_date);
+          const ym = nd && nd.length >= 7 ? nd.slice(0, 7) : '';
+          return ym ? `${f.bdr_id}|${f.deal_id}|${ym}` : '';
+        })
+        .filter(Boolean)
+    );
+
     // Transform Supabase response to include service_name and is_renewal in revenue_events
     const transformedData = (data || []).map((entry: any) => {
       let result = { ...entry };
@@ -241,6 +315,20 @@ export async function GET(request: NextRequest) {
       } else {
         result.is_renewal = isRenewal;
       }
+
+      const effRaw = entry.payable_date || entry.accrual_date || (entry.month ? `${entry.month}-01` : null);
+      const eff = normDateStr(effRaw) || effRaw;
+      const monthKey =
+        eff && typeof eff === 'string' && eff.length >= 7 ? `${entry.bdr_id}|${entry.deal_id}|${eff.slice(0, 7)}` : '';
+      result.is_approved =
+        entry.status === 'paid' ||
+        approvedEntryIdsSupa.has(entry.id) ||
+        (!!eff &&
+          (fpSetSupa.has(`${entry.bdr_id}|${entry.deal_id}|${eff}`) || (!!monthKey && fpMonthSetSupa.has(monthKey))));
+
+      const reportAdjS = includeReportAdjustments ? adjustmentByEntryIdSupa.get(entry.id) : undefined;
+      if (reportAdjS) (result as any).report_adjustment = reportAdjS;
+
       return result;
     });
 

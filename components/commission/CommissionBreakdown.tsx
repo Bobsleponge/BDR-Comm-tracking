@@ -105,12 +105,15 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
   const formatMoney = (n: number) =>
     `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+  const isSettledForDisplay = (e: CommissionBreakdownEntry) =>
+    e.status === 'paid' || e.isApproved === true;
+
   const monthApprovalAmounts = (entries: CommissionBreakdownEntry[]) => {
     const approvedAmount = entries
-      .filter((e) => e.isApproved === true)
+      .filter(isSettledForDisplay)
       .reduce((sum, e) => sum + e.amount, 0);
     const leftToClaim = entries
-      .filter((e) => e.isApproved !== true)
+      .filter((e) => !isSettledForDisplay(e))
       .reduce((sum, e) => sum + e.amount, 0);
     return { approvedAmount, leftToClaim };
   };
@@ -293,8 +296,8 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                           {monthData.entries.length} {monthData.entries.length === 1 ? 'entry' : 'entries'}
                         </span>
                         {(() => {
-                          const approved = monthData.entries.filter(e => e.isApproved).length;
-                          const pending = monthData.entries.filter(e => e.isApproved === false).length;
+                          const approved = monthData.entries.filter(isSettledForDisplay).length;
+                          const pending = monthData.entries.filter((e) => !isSettledForDisplay(e)).length;
                           if (approved > 0 || pending > 0) {
                             return (
                               <>
@@ -443,8 +446,11 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                             </TableCell>
                             <TableCell>
                               {entry.isApproved !== undefined ? (
-                                <Badge variant={entry.isApproved ? 'default' : 'secondary'} className={entry.isApproved ? 'bg-green-600 hover:bg-green-600' : ''}>
-                                  {entry.isApproved ? 'Approved' : 'Pending'}
+                                <Badge
+                                  variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
+                                  className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600' : ''}
+                                >
+                                  {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
                                 </Badge>
                               ) : (
                                 <span className="text-muted-foreground text-sm">—</span>

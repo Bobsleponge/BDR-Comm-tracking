@@ -1,0 +1,59 @@
+
+══════════════════════════════════════════════════════════════════════════════
+  QUARTERLY BONUS — APPROVED (Excel) vs CURRENT CALC (DB) vs STILL DUE
+══════════════════════════════════════════════════════════════════════════════
+
+BDR: test-bdr-id  Quarter: 2026-Q1 (2026-01-01 → 2026-03-31)
+Bonus Excel file: /Users/Matty/BDR Comm Tracking/quarterly-bonus-report-2026-Q1-payable-2026-03-31 (3).xlsx
+
+── 1) APPROVED ON QUARTERLY BONUS EXCEL (source of truth for Q1 bonus approval) ──
+   Data rows: 116
+   Sum attributed (from rows):     $134266.99
+   Sum quarterly bonus (2.5%):     $3356.89
+   Preamble on sheet:              $134266.99 attr | $3356.67 bonus
+   Note: row sum vs preamble bonus diff: $0.22
+
+── 2) CURRENT APP STRUCTURE (commission_entries with payable_date in quarter) ──
+   Rows included:                  119
+   Total attributed (recomputed):  $140091.99
+   Total quarterly bonus (2.5%):   $3502.30
+   Delta vs Excel row bonus:       $145.41
+   Delta vs Excel row attributed:  $5825.01
+
+── 3) quarterly_performance (local DB) ──
+   No row for this BDR/quarter (dashboard may still compute bonus from commission lines).
+
+── 4) LINE MATCH (client|deal|payable_date|attributed) ──
+   Matched (Excel + DB):           115
+   Approved Excel only (no DB key): 1  → bonus subtotal $1.25
+   In DB calc only (not on Excel): 4  → bonus subtotal $146.88 (not approved for Q1 sheet — usually Q2 or data fix)
+
+   --- Rows on APPROVED Excel but NOT in current Q1 DB calculation ---
+      Stephen Oliver | 1040 | 2026-03-14 | attr $50.00 | bonus $1.25
+
+   --- Rows in DB Q1 calc but NOT on approved Excel ---
+      ATC Fisherman | Bookkeeping | 2026-03-13 | attr $500.00 | bonus $12.50 | comm status accrued
+      Stephen Oliver | 1040 | 2026-03-14 | attr $1500.00 | bonus $37.50 | comm status paid
+      Jane Rose | Scorp and 1040 | 2026-03-17 | attr $1000.00 | bonus $25.00 | comm status accrued
+      Denise Ecuyer | S-corp and tax | 2026-03-27 | attr $2875.00 | bonus $71.88 | comm status accrued
+
+── 5) MATCHED LINES — commission entry status (normal comm; bonus is separate) ──
+   Approved bonus on matched lines: $3355.64
+   Matched line statuses: paid=115
+
+── 6) WHAT STILL NEEDS TO BE PAID (QUARTERLY BONUS) ──
+   The database does not store "quarterly bonus paid" per line. Use the Excel as the approval amount.
+
+   A) Total quarterly bonus APPROVED on sheet (row sum):     $3356.89
+      Treat this as the Q1 bonus amount finance approved (subject to eligibility rules).
+
+   B) Amount that aligns with current DB + same keys:       $3355.64
+   C) Approved bonus on lines with NO matching DB row:        $1.25
+      → Reconcile data (payable date, attributed revenue, client/deal labels) before paying these.
+
+   D) DB adds bonus not on approved Excel:                    $146.88
+      → Do not pay as Q1 approved bonus; include in next quarter or new approval.
+
+   SUMMARY — For Q1 payout planning, approved bonus total = $3356.89
+   Subtract any amounts you already paid outside this app.
+   If (C) > 0, fix source data so those lines appear in DB or confirm manual payment.

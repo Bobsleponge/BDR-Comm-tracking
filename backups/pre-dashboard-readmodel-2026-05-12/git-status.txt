@@ -1,0 +1,29 @@
+ M app/api/clients/route.ts
+ M app/api/commission/batches/[id]/approve/route.ts
+ M app/api/commission/batches/[id]/export/route.ts
+ M app/api/commission/batches/[id]/route.ts
+ M app/api/commission/breakdown/route.ts
+ M app/api/commission/entries/route.ts
+ M app/api/dashboard/bonus-calculation-report/route.ts
+ M app/commission/batches/[id]/page.tsx
+ M app/commission/page.tsx
+ M components/commission/CommissionBreakdown.tsx
+ M components/commission/CommissionEntriesTable.tsx
+ M components/dashboard/ProjectedCommissionByQuarter.tsx
+ M components/deals/DealForm.tsx
+ M lib/commission/export-rows.ts
+ M next.config.js
+ M package.json
+?? backups/
+?? commission-report-2026-03-31-d5bb2eef-formatted.xlsx
+?? commission-report-2026-03-31-d5bb2eef.xlsx
+?? lib/commission/entry-approval-display.ts
+?? "quarterly-bonus-report-2026-Q1-payable-2026-03-31 (3)-formatted.xlsx"
+?? "quarterly-bonus-report-2026-Q1-payable-2026-03-31 (3).xlsx"
+?? reports/
+?? scripts/backfill-commission-snapshot-adjustments.ts
+?? scripts/mark-paid-from-excel-reports.ts
+?? scripts/reconcile-march-reports.ts
+?? scripts/reconcile-quarterly-bonus-approved-vs-due.ts
+?? scripts/report-q2-allocation-and-comm-status.ts
+?? scripts/sync-approved-from-reports.ts

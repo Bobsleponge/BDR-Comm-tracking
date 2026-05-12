@@ -38,6 +38,11 @@ interface BatchItem {
   payable_date: string | null;
   accrual_date: string | null;
   month: string;
+  /** Auto summary of overrides (draft + frozen at approve). */
+  change_summary?: string | null;
+  /** Last batch-item update before approve (SQLite/Supabase). */
+  adjusted_at?: string | null;
+  is_adjusted?: boolean;
 }
 
 interface Batch {
@@ -611,6 +616,7 @@ export default function CommissionBatchDetailPage() {
                         <TableHead>Original commission</TableHead>
                         <TableHead>Override amount</TableHead>
                         <TableHead>Final amount</TableHead>
+                        <TableHead className="min-w-[200px]">Adjustment</TableHead>
                         <TableHead>Note</TableHead>
                         {isDraft && <TableHead className="w-[100px]">Actions</TableHead>}
                       </TableRow>
@@ -622,7 +628,7 @@ export default function CommissionBatchDetailPage() {
                         return (
                           <Fragment key={month}>
                             <TableRow className="bg-muted/50 hover:bg-muted/50">
-                              <TableCell colSpan={isDraft ? 13 : 12} className="font-semibold py-3">
+                              <TableCell colSpan={isDraft ? 14 : 13} className="font-semibold py-3">
                                 {formatMonthHeading(month)} — ${monthTotal.toFixed(2)}
                               </TableCell>
                             </TableRow>
@@ -633,9 +639,18 @@ export default function CommissionBatchDetailPage() {
                               const displayDate = item.override_payment_date ?? item.payable_date ?? item.accrual_date ?? item.collection_date;
                               const dealLabel = item.service_name || item.service_type || 'Deal';
 
+                              const rowHighlight =
+                                item.is_adjusted === true ? 'bg-amber-500/10 hover:bg-amber-500/[0.14]' : '';
+                              let adjustedDisplay = '';
+                              try {
+                                if (item.adjusted_at) adjustedDisplay = format(new Date(item.adjusted_at), 'MMM d, yyyy h:mm a');
+                              } catch {
+                                adjustedDisplay = String(item.adjusted_at ?? '');
+                              }
+
                               return (
                                 <Fragment key={item.id}>
-                                  <TableRow>
+                                  <TableRow className={rowHighlight}>
                             <TableCell>{item.client_name}</TableCell>
                             <TableCell>{dealLabel}</TableCell>
                             <TableCell>
@@ -733,6 +748,25 @@ export default function CommissionBatchDetailPage() {
                               )}
                             </TableCell>
                             <TableCell>${finalAmt.toFixed(2)}</TableCell>
+                            <TableCell className="align-top">
+                              {!item.change_summary && !item.is_adjusted && !adjustedDisplay ? (
+                                '—'
+                              ) : (
+                                <div className="space-y-1 max-w-xs">
+                                  {item.is_adjusted && (
+                                    <Badge variant="outline" className="border-amber-600/50 text-amber-950 dark:text-amber-100">
+                                      Adjusted
+                                    </Badge>
+                                  )}
+                                  {item.change_summary ? (
+                                    <p className="text-sm">{item.change_summary}</p>
+                                  ) : null}
+                                  {adjustedDisplay ? (
+                                    <p className="text-xs text-muted-foreground">Recorded {adjustedDisplay}</p>
+                                  ) : null}
+                                </div>
+                              )}
+                            </TableCell>
                             <TableCell>
                               {isDraft ? (
                                 <div className="flex items-center gap-2">
@@ -786,7 +820,7 @@ export default function CommissionBatchDetailPage() {
                                   </TableRow>
                                   {isDraft && !item.is_renewal && renewalOverrideEntryId === item.commission_entry_id && (
                                     <TableRow className="bg-muted/20">
-                                      <TableCell colSpan={isDraft ? 13 : 12} className="py-3">
+                                      <TableCell colSpan={isDraft ? 14 : 13} className="py-3">
                                 <div className="flex flex-wrap items-end gap-4 max-w-2xl">
                                   <div>
                                     <label className="block text-xs font-medium text-muted-foreground mb-1">Previous deal amount</label>

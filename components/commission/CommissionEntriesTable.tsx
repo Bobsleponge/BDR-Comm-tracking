@@ -25,6 +25,11 @@ interface CommissionEntry {
   is_approved?: boolean;
   accrual_date?: string | null;
   payable_date?: string | null;
+  report_adjustment?: {
+    batch_id: string;
+    change_summary: string | null;
+    adjusted_at: string | null;
+  };
   deals?: {
     client_name: string;
     service_type: string;
@@ -44,6 +49,10 @@ interface CommissionEntriesTableProps {
   isAdmin?: boolean;
   onMarkPaid?: (id: string) => Promise<void>;
   onAmountUpdated?: () => void | Promise<void>;
+}
+
+function isSettledForDisplay(entry: CommissionEntry) {
+  return entry.status === 'paid' || entry.is_approved === true;
 }
 
 export function CommissionEntriesTable({ 
@@ -134,13 +143,14 @@ export function CommissionEntriesTable({
                 <TableHead>Payable Date</TableHead>
                 <TableHead>Amount</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="min-w-[160px]">Report adjustment</TableHead>
                 {isAdmin && <TableHead>Actions</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {entries.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={isAdmin ? 7 : 6} className="text-center text-muted-foreground">
+                  <TableCell colSpan={isAdmin ? 8 : 7} className="text-center text-muted-foreground">
                     No commission entries found
                   </TableCell>
                 </TableRow>
@@ -150,8 +160,22 @@ export function CommissionEntriesTable({
                   const billingType = revenueEvent?.billing_type || entry.deals?.service_type || 'N/A';
                   const serviceName = revenueEvent?.service_name || billingType;
                   
+                  const overdue = isOverdue(entry);
+                  const reportAdjClass = entry.report_adjustment && !overdue ? 'bg-amber-500/10 hover:bg-amber-500/[0.14]' : '';
+                  let reportAdjDate = '';
+                  if (entry.report_adjustment?.adjusted_at) {
+                    try {
+                      reportAdjDate = format(new Date(entry.report_adjustment.adjusted_at), 'MMM d, yyyy h:mm a');
+                    } catch {
+                      reportAdjDate = String(entry.report_adjustment.adjusted_at);
+                    }
+                  }
+
                   return (
-                    <TableRow key={entry.id} className={isOverdue(entry) ? 'bg-destructive/10' : ''}>
+                    <TableRow
+                      key={entry.id}
+                      className={[overdue ? 'bg-destructive/10' : '', reportAdjClass].filter(Boolean).join(' ')}
+                    >
                       <TableCell>
                         <div className="font-medium">
                           {entry.deals?.client_name || 'N/A'}
@@ -260,11 +284,31 @@ export function CommissionEntriesTable({
                             {entry.status}
                           </Badge>
                           {entry.is_approved !== undefined && (
-                            <Badge variant={entry.is_approved ? 'default' : 'secondary'} className={entry.is_approved ? 'bg-green-600 hover:bg-green-600' : ''}>
-                              {entry.is_approved ? 'Approved' : 'Pending'}
+                            <Badge
+                              variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
+                              className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600' : ''}
+                            >
+                              {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
                             </Badge>
                           )}
                         </div>
+                      </TableCell>
+                      <TableCell className="align-top text-muted-foreground">
+                        {entry.report_adjustment ? (
+                          <div className="space-y-1">
+                            <Badge variant="outline" className="border-amber-600/40 text-xs">
+                              Adjusted on report
+                            </Badge>
+                            {entry.report_adjustment.change_summary ? (
+                              <p className="text-xs text-foreground">{entry.report_adjustment.change_summary}</p>
+                            ) : null}
+                            {reportAdjDate ? (
+                              <p className="text-[11px]">Recorded {reportAdjDate}</p>
+                            ) : null}
+                          </div>
+                        ) : (
+                          '—'
+                        )}
                       </TableCell>
                       {isAdmin && (
                         <TableCell>
