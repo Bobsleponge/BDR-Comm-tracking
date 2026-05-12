@@ -26,14 +26,14 @@ export const DashboardStatsGrid = memo(function DashboardStatsGrid({
       bgColor: 'bg-blue-100',
     },
     {
-      name: 'Commission Earned',
+      name: 'Commission settled',
       value: `$${commissionEarned.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       icon: DollarSign,
       color: 'text-green-600',
       bgColor: 'bg-green-100',
     },
     {
-      name: 'Commission Pending',
+      name: 'Commission open',
       value: `$${commissionPending.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       icon: Clock,
       color: 'text-yellow-600',

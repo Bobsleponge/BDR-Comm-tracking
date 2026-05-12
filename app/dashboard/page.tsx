@@ -95,14 +95,15 @@ export default function DashboardPage() {
   });
 
   const { data: dealsRaw, error: dealsError } = useSWR<any>('/api/deals?status=closed-won&limit=5', fetcher, {
-    revalidateOnFocus: false,
-    revalidateOnReconnect: false,
-    dedupingInterval: 60000,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: 2000,
   });
 
   const { data: trendData } = useSWR<Array<{ month: string; amount: number }>>('/api/dashboard/trend', fetcher, {
-    revalidateOnFocus: false,
-    dedupingInterval: 60000,
+    revalidateOnFocus: true,
+    revalidateOnReconnect: true,
+    dedupingInterval: 2000,
   });
   
   // Extract deals array from paginated response
