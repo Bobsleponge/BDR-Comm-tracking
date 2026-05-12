@@ -9,7 +9,7 @@
 
 ## What was saved
 
-- `db/local.db` — consistent SQLite backup via `sqlite3 .backup`
+- `db/local.db` — consistent SQLite backup via `sqlite3 .backup` (on disk only; `local.db` is gitignored)
 - `env/.env.local` — local env (gitignored; not in the git checkpoint)
 - `reports/` and `artifacts/` — text reports and Excel workbooks
 - Git branch `checkpoint/pre-dashboard-readmodel-2026-05-12` and tag `checkpoint/pre-dashboard-readmodel-2026-05-12`
