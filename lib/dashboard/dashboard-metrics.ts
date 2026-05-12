@@ -306,7 +306,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
   const buckets = loadCommissionBucketsLocal(db, bdrId, nextPayoutStr, currentMonthStr, nextMonthStr);
   const closedDealsBonus = fetchClosedDealsBonusRowsLocal(db, bdrId, quarterStartStr, quarterEndStr);
   const payableRowsForYear = fetchPayableBonusRowsLocal(db, bdrId, yearQuarterStart, yearQuarterEnd).rows;
-  const { projectedBonusByQuarter, progressByQuarter } = buildQuarterlyPayableProgressFromRows(
+  const { projectedBonusByQuarter: projectedCommissionByQuarter, progressByQuarter } = buildQuarterlyPayableProgressFromRows(
     payableRowsForYear,
     year,
     todayStr,
@@ -413,7 +413,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
     quarterlyProgressByQuarter: progressByQuarter,
     expectedBonusOnSignedDeals: Number((quarterlySignedDealsValue * 0.025).toFixed(2)),
     expectedBonusOnCashCollected: Number((quarterlyRevenueCollected * 0.025).toFixed(2)),
-    projectedQuarterlyBonus: Number((projectedBonusByQuarter[currentQuarter] ?? 0).toFixed(2)),
+    projectedQuarterlyBonus: Number((projectedCommissionByQuarter[currentQuarter] ?? 0).toFixed(2)),
     ytdPayableRevenue,
     quarterlyProgress: {
       revenueCollected: quarterlyRevenueCollected,
@@ -625,7 +625,7 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
   const buckets = await loadCommissionBucketsSupabase(supabase, bdrId, nextPayoutStr, currentMonthStr, nextMonthStr);
   const closedDealsBonus = await fetchClosedDealsBonusRowsSupabase(supabase, bdrId, quarterStartStr, quarterEndStr);
   const payableRowsForYear = (await fetchPayableBonusRowsSupabase(supabase, bdrId, yearQuarterStart, yearQuarterEnd)).rows;
-  const { projectedBonusByQuarter, progressByQuarter } = buildQuarterlyPayableProgressFromRows(
+  const { projectedBonusByQuarter: projectedCommissionByQuarter, progressByQuarter } = buildQuarterlyPayableProgressFromRows(
     payableRowsForYear,
     year,
     todayStr,
@@ -725,7 +725,7 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
     quarterlyProgressByQuarter: progressByQuarter,
     expectedBonusOnSignedDeals: Number((quarterlySignedDealsValue * 0.025).toFixed(2)),
     expectedBonusOnCashCollected: Number((quarterlyRevenueCollected * 0.025).toFixed(2)),
-    projectedQuarterlyBonus: Number((projectedBonusByQuarter[currentQuarter] ?? 0).toFixed(2)),
+    projectedQuarterlyBonus: Number((projectedCommissionByQuarter[currentQuarter] ?? 0).toFixed(2)),
     ytdPayableRevenue,
     quarterlyProgress: {
       revenueCollected: Number(quarterlyRevenueCollected.toFixed(2)),
