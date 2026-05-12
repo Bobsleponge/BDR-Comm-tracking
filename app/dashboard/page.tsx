@@ -28,6 +28,8 @@ interface DashboardStats {
     achievedPercent: number;
     bonusEligible: boolean;
     target: number;
+    projectedRevenueCollected?: number;
+    projectedAchievedPercent?: number;
   };
   annualProgress?: {
     revenueCollected: number;
@@ -37,6 +39,8 @@ interface DashboardStats {
     achievedPercent: number;
     daysElapsed: number;
     daysRemaining: number;
+    projectedRevenueCollected?: number;
+    projectedAchievedPercent?: number;
   };
   bhagProgress?: {
     revenueCollected: number;
@@ -46,6 +50,8 @@ interface DashboardStats {
     achievedPercent: number;
     daysElapsed: number;
     daysRemaining: number;
+    projectedRevenueCollected?: number;
+    projectedAchievedPercent?: number;
   };
   nextMonthPayout?: number;
   quarterlyCommissionOnClosedDeals?: number;
@@ -227,6 +233,8 @@ export default function DashboardPage() {
                       revenueCollected: stats.quarterlyProgress.revenueCollected ?? 0,
                       target: stats.quarterlyProgress.target ?? 75000,
                       achievedPercent: stats.quarterlyProgress.achievedPercent ?? 0,
+                      projectedRevenueCollected: stats.quarterlyProgress.projectedRevenueCollected,
+                      projectedAchievedPercent: stats.quarterlyProgress.projectedAchievedPercent,
                       newBusinessCollected: stats.quarterlyProgress.newBusinessCollected,
                       renewalUpliftCollected: stats.quarterlyProgress.renewalUpliftCollected,
                     }}
@@ -235,6 +243,8 @@ export default function DashboardPage() {
                       revenueCollected: stats.annualProgress.revenueCollected ?? 0,
                       target: stats.annualProgress.target ?? 250000,
                       achievedPercent: stats.annualProgress.achievedPercent ?? 0,
+                      projectedRevenueCollected: stats.annualProgress.projectedRevenueCollected,
+                      projectedAchievedPercent: stats.annualProgress.projectedAchievedPercent,
                       newBusinessCollected: stats.annualProgress.newBusinessCollected,
                       renewalUpliftCollected: stats.annualProgress.renewalUpliftCollected,
                       daysElapsed: stats.annualProgress.daysElapsed,
@@ -245,6 +255,8 @@ export default function DashboardPage() {
                       revenueCollected: stats.bhagProgress.revenueCollected ?? 0,
                       target: stats.bhagProgress.target ?? 800000,
                       achievedPercent: stats.bhagProgress.achievedPercent ?? 0,
+                      projectedRevenueCollected: stats.bhagProgress.projectedRevenueCollected,
+                      projectedAchievedPercent: stats.bhagProgress.projectedAchievedPercent,
                       newBusinessCollected: stats.bhagProgress.newBusinessCollected,
                       renewalUpliftCollected: stats.bhagProgress.renewalUpliftCollected,
                       daysElapsed: stats.bhagProgress.daysElapsed,

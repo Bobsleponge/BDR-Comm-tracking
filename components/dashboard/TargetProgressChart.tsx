@@ -9,6 +9,8 @@ interface TargetProgress {
   revenueCollected: number;
   target: number;
   achievedPercent: number;
+  projectedRevenueCollected?: number;
+  projectedAchievedPercent?: number;
   newBusinessCollected?: number;
   renewalUpliftCollected?: number;
   daysElapsed?: number;
@@ -40,6 +42,8 @@ export function TargetProgressChart({
       collected: number;
       target: number;
       percent: number;
+      projectedCollected?: number;
+      projectedPercent?: number;
       newBusinessCollected?: number;
       renewalUpliftCollected?: number;
       daysElapsed?: number;
@@ -52,6 +56,8 @@ export function TargetProgressChart({
         collected: quarterly.revenueCollected,
         target: quarterly.target,
         percent: quarterly.achievedPercent,
+        projectedCollected: quarterly.projectedRevenueCollected,
+        projectedPercent: quarterly.projectedAchievedPercent,
         newBusinessCollected: quarterly.newBusinessCollected,
         renewalUpliftCollected: quarterly.renewalUpliftCollected,
       });
@@ -63,6 +69,8 @@ export function TargetProgressChart({
         collected: annual.revenueCollected,
         target: annual.target,
         percent: annual.achievedPercent,
+        projectedCollected: annual.projectedRevenueCollected,
+        projectedPercent: annual.projectedAchievedPercent,
         newBusinessCollected: annual.newBusinessCollected,
         renewalUpliftCollected: annual.renewalUpliftCollected,
         daysElapsed: annual.daysElapsed,
@@ -76,6 +84,8 @@ export function TargetProgressChart({
         collected: bhag.revenueCollected,
         target: bhag.target,
         percent: bhag.achievedPercent,
+        projectedCollected: bhag.projectedRevenueCollected,
+        projectedPercent: bhag.projectedAchievedPercent,
         newBusinessCollected: bhag.newBusinessCollected,
         renewalUpliftCollected: bhag.renewalUpliftCollected,
         daysElapsed: bhag.daysElapsed,
@@ -105,7 +115,8 @@ export function TargetProgressChart({
       <CardHeader>
         <CardTitle>Target Progress Overview</CardTitle>
         <p className="text-sm text-muted-foreground mt-2">
-          All goals are based on actual cash collected: new business uses full amount claimed; renewals use uplift amount only.
+          Actual progress uses cash collected for annual and BHAG targets. Quarterly uses payable-date revenue through today.
+          Projected totals include scheduled revenue from loaded deals that is still expected to process in the period.
         </p>
         {hasBothAnnualTargets && (
           <p className="text-sm text-muted-foreground mt-1">
@@ -117,11 +128,13 @@ export function TargetProgressChart({
         <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           {targets.map((target) => {
             const progressPercent = Math.min(target.percent, 100);
+            const projectedPercent = Math.min(target.projectedPercent ?? progressPercent, 100);
             const remaining = Math.max(0, target.target - target.collected);
+            const projectedRemaining = Math.max(0, target.target - (target.projectedCollected ?? target.collected));
             const status = getStatusText(target.percent);
+            const projectedStatus = getStatusText(target.projectedPercent ?? target.percent);
             const progressColor = getProgressColor(target.percent);
-
-            // Time-based pacing for annual targets
+            const projectedColor = getProgressColor(target.projectedPercent ?? target.percent);
             const totalDays = (target.daysElapsed ?? 0) + (target.daysRemaining ?? 0);
             const timeElapsedPercent = totalDays > 0 ? (target.daysElapsed ?? 0) / totalDays * 100 : 0;
             const onTrack = totalDays > 0 && progressPercent >= timeElapsedPercent * 0.9;
@@ -143,9 +156,27 @@ export function TargetProgressChart({
                 />
                 <div className="text-center text-2xl font-bold">{progressPercent.toFixed(0)}%</div>
 
+                {(target.projectedCollected != null || target.projectedPercent != null) && (
+                  <div className="space-y-2 pt-2 border-t">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Projected for period</span>
+                      <span className={projectedStatus.color}>{projectedStatus.text}</span>
+                    </div>
+                    <ProgressBar
+                      value={projectedPercent}
+                      color={projectedColor}
+                      showAnimation
+                      className="mt-1"
+                    />
+                    <div className="text-center text-lg font-semibold text-muted-foreground">
+                      {(target.projectedPercent ?? progressPercent).toFixed(0)}% projected
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
-                    <span className="text-sm text-muted-foreground">Cash Collected</span>
+                    <span className="text-sm text-muted-foreground">Actual to date</span>
                     <span className="text-sm font-semibold">
                       ${target.collected.toLocaleString('en-US', {
                         minimumFractionDigits: 0,
@@ -178,6 +209,28 @@ export function TargetProgressChart({
                       })}
                     </span>
                   </div>
+                  {projectedRemaining > 0 && target.projectedCollected != null && (
+                    <div className="flex justify-between items-center pt-2 border-t">
+                      <span className="text-sm text-muted-foreground">Projected remaining</span>
+                      <span className="text-sm font-semibold text-blue-700">
+                        ${projectedRemaining.toLocaleString('en-US', {
+                          minimumFractionDigits: 0,
+                          maximumFractionDigits: 0,
+                        })}
+                      </span>
+                    </div>
+                  )}
+                  {target.projectedCollected != null && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-muted-foreground">Projected total</span>
+                      <span className="text-sm font-semibold">
+                        ${target.projectedCollected.toLocaleString('en-US', {
+                          minimumFractionDigits: 0,
+                          maximumFractionDigits: 0,
+                        })}
+                      </span>
+                    </div>
+                  )}
                   {remaining > 0 && (
                     <div className="flex justify-between items-center pt-2 border-t">
                       <span className="text-sm text-muted-foreground">Remaining</span>

@@ -18,6 +18,12 @@ import {
   loadAnnualTierProgressSupabase,
   type AnnualTierSummary,
 } from '@/lib/dashboard/annual-tier-export';
+import {
+  buildTargetProgressProjection,
+  sumPayableAttributedRevenueInQuarter,
+  sumScheduledCashCollectedLocal,
+  sumScheduledCashCollectedSupabase,
+} from '@/lib/dashboard/target-progress-projection';
 import { getLocalDB } from '@/lib/db/local-db';
 
 type LocalDb = ReturnType<typeof getLocalDB>;
@@ -37,6 +43,8 @@ export type DashboardProgressSlice = {
   achievedPercent: number;
   bonusEligible: boolean;
   target: number;
+  projectedRevenueCollected?: number;
+  projectedAchievedPercent?: number;
 };
 
 export type DashboardAnnualSlice = {
@@ -47,6 +55,8 @@ export type DashboardAnnualSlice = {
   achievedPercent: number;
   daysElapsed: number;
   daysRemaining: number;
+  projectedRevenueCollected?: number;
+  projectedAchievedPercent?: number;
 };
 
 export type DashboardStatsPayload = {
@@ -404,6 +414,21 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
   const bhagTarget = 800000;
   const annualTier = loadAnnualTierProgressLocal(db, bdrId, year, todayStr).summary;
   const annualGoalTarget = annualTier.threshold;
+  const quarterlyFullQuarterRevenue = sumPayableAttributedRevenueInQuarter(
+    payableRowsForYear.map((row) => ({
+      payable_date: row.payable_date,
+      attributed_revenue: row.attributed_revenue,
+    })),
+    currentQuarter
+  );
+  const quarterlyProjection = buildTargetProgressProjection(
+    quarterlyRevenueCollected,
+    Math.max(0, quarterlyFullQuarterRevenue - quarterlyRevenueCollected),
+    quarterlyTarget
+  );
+  const scheduledAnnual = sumScheduledCashCollectedLocal(db, bdrId, todayStr, yearEndStr);
+  const annualProjection = buildTargetProgressProjection(annualRevenue, scheduledAnnual, annualGoalTarget);
+  const bhagProjection = buildTargetProgressProjection(annualRevenue, scheduledAnnual, bhagTarget);
 
   return {
     closedDeals,
@@ -430,9 +455,17 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
       achievedPercent: Number(currentQuarterProgress.achievedPercent.toFixed(2)),
       bonusEligible: quarterlyRevenueCollected >= quarterlyTarget,
       target: quarterlyTarget,
+      projectedRevenueCollected: quarterlyProjection.projectedRevenueCollected,
+      projectedAchievedPercent: quarterlyProjection.projectedAchievedPercent,
     },
-    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
-    bhagProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
+    annualProgress: {
+      ...buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
+      ...annualProjection,
+    },
+    bhagProgress: {
+      ...buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
+      ...bhagProjection,
+    },
   };
 }
 
@@ -718,6 +751,29 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
   const bhagTarget = 800000;
   const annualTier = (await loadAnnualTierProgressSupabase(supabase, bdrId, year, todayStr)).summary;
   const annualGoalTarget = annualTier.threshold;
+  const quarterlyFullQuarterRevenue = sumPayableAttributedRevenueInQuarter(
+    payableRowsForYear.map((row) => ({
+      payable_date: row.payable_date,
+      attributed_revenue: row.attributed_revenue,
+    })),
+    currentQuarter
+  );
+  const quarterlyProjection = buildTargetProgressProjection(
+    quarterlyRevenueCollected,
+    Math.max(0, quarterlyFullQuarterRevenue - quarterlyRevenueCollected),
+    quarterlyTarget
+  );
+
+  const { data: scheduledAnnualRows } = await supabase
+    .from('revenue_events')
+    .select('amount_collected, collection_date, deals!inner(cancellation_date)')
+    .eq('bdr_id', bdrId)
+    .gt('collection_date', todayStr)
+    .lte('collection_date', yearEndStr)
+    .eq('commissionable', true);
+  const scheduledAnnual = sumScheduledCashCollectedSupabase(scheduledAnnualRows || [], todayStr, yearEndStr);
+  const annualProjection = buildTargetProgressProjection(annualRevenue, scheduledAnnual, annualGoalTarget);
+  const bhagProjection = buildTargetProgressProjection(annualRevenue, scheduledAnnual, bhagTarget);
 
   return {
     closedDeals: closedDealsCount ?? 0,
@@ -744,9 +800,17 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
       achievedPercent: Number(currentQuarterProgress.achievedPercent.toFixed(2)),
       bonusEligible: quarterlyRevenueCollected >= quarterlyTarget,
       target: quarterlyTarget,
+      projectedRevenueCollected: quarterlyProjection.projectedRevenueCollected,
+      projectedAchievedPercent: quarterlyProjection.projectedAchievedPercent,
     },
-    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
-    bhagProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
+    annualProgress: {
+      ...buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
+      ...annualProjection,
+    },
+    bhagProgress: {
+      ...buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
+      ...bhagProjection,
+    },
   };
 }
 
