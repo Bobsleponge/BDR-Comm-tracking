@@ -1,0 +1,25 @@
+{
+  "id": "pre-dashboard-readmodel-2026-05-12",
+  "created_at": "2026-05-12T22:51:00+02:00",
+  "database": {
+    "mode": "local_sqlite",
+    "live_path": "local.db",
+    "backup_path": "backups/pre-dashboard-readmodel-2026-05-12/db/local.db",
+    "env": {
+      "USE_LOCAL_DB": "true",
+      "NEXT_PUBLIC_SUPABASE_URL": null
+    },
+    "row_counts": {
+      "commission_entries": 334,
+      "deals": 113,
+      "commission_batches": 4
+    },
+    "sha256": "c5f62eb13805988af93a65c9e2c7df780e0d3ed831e1cf60a7c148270c2165fb"
+  },
+  "git": {
+    "branch": "checkpoint/pre-dashboard-readmodel-2026-05-12",
+    "tag": "checkpoint/pre-dashboard-readmodel-2026-05-12"
+  },
+  "env_backup_path": "backups/pre-dashboard-readmodel-2026-05-12/env/.env.local",
+  "restore_script": "scripts/restore-pre-dashboard-readmodel-checkpoint.sh"
+}
