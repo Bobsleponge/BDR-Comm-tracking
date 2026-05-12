@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKUP="$ROOT/backups/pre-dashboard-readmodel-2026-05-12"
 BRANCH="checkpoint/pre-dashboard-readmodel-2026-05-12"
-TAG="checkpoint/pre-dashboard-readmodel-2026-05-12"
+TAG="freeze/pre-dashboard-readmodel-2026-05-12"
 
 cd "$ROOT"
 

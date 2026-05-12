@@ -18,7 +18,7 @@
   },
   "git": {
     "branch": "checkpoint/pre-dashboard-readmodel-2026-05-12",
-    "tag": "checkpoint/pre-dashboard-readmodel-2026-05-12",
+    "tag": "freeze/pre-dashboard-readmodel-2026-05-12",
     "commit": "ac1635e"
   },
   "env_backup_path": "backups/pre-dashboard-readmodel-2026-05-12/env/.env.local",

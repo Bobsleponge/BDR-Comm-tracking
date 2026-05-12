@@ -12,7 +12,7 @@
 - `db/local.db` — consistent SQLite backup via `sqlite3 .backup` (on disk only; `local.db` is gitignored)
 - `env/.env.local` — local env (gitignored; not in the git checkpoint)
 - `reports/` and `artifacts/` — text reports and Excel workbooks
-- Git branch `checkpoint/pre-dashboard-readmodel-2026-05-12` and tag `checkpoint/pre-dashboard-readmodel-2026-05-12`
+- Git branch `checkpoint/pre-dashboard-readmodel-2026-05-12` and tag `freeze/pre-dashboard-readmodel-2026-05-12`
 - `MANIFEST.json` — checksum and row-count metadata
 - `git-head.txt`, `git-branch.txt`, `git-status.txt` — metadata from snapshot time
 
