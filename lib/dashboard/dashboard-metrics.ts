@@ -13,6 +13,11 @@ import {
   fetchPayableBonusRowsSupabase,
   type QuarterlyPayableProgressItem,
 } from '@/lib/dashboard/quarterly-bonus-export';
+import {
+  loadAnnualTierProgressLocal,
+  loadAnnualTierProgressSupabase,
+  type AnnualTierSummary,
+} from '@/lib/dashboard/annual-tier-export';
 import { getLocalDB } from '@/lib/db/local-db';
 
 type LocalDb = ReturnType<typeof getLocalDB>;
@@ -61,6 +66,7 @@ export type DashboardStatsPayload = {
   expectedBonusOnCashCollected: number;
   projectedQuarterlyBonus: number;
   ytdPayableRevenue: number;
+  annualTier: AnnualTierSummary;
   quarterlyProgress: DashboardProgressSlice;
   annualProgress: DashboardAnnualSlice;
   bhagProgress: DashboardAnnualSlice;
@@ -395,8 +401,9 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
   const daysInYear = Math.floor((yearEndTime - yearStartTime) / (1000 * 60 * 60 * 24)) + 1;
   const daysRemaining = daysInYear - daysElapsed;
 
-  const annualTarget = 250000;
   const bhagTarget = 800000;
+  const annualTier = loadAnnualTierProgressLocal(db, bdrId, year, todayStr).summary;
+  const annualGoalTarget = annualTier.threshold;
 
   return {
     closedDeals,
@@ -415,6 +422,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
     expectedBonusOnCashCollected: Number((quarterlyRevenueCollected * 0.025).toFixed(2)),
     projectedQuarterlyBonus: Number((projectedCommissionByQuarter[currentQuarter] ?? 0).toFixed(2)),
     ytdPayableRevenue,
+    annualTier,
     quarterlyProgress: {
       revenueCollected: quarterlyRevenueCollected,
       newBusinessCollected: Number(quarterlyNewBusinessCollected.toFixed(2)),
@@ -423,7 +431,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
       bonusEligible: quarterlyRevenueCollected >= quarterlyTarget,
       target: quarterlyTarget,
     },
-    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualTarget, daysElapsed, daysRemaining),
+    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
     bhagProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
   };
 }
@@ -707,8 +715,9 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
   const daysInYear = Math.floor((yearEndTime - yearStartTime) / (1000 * 60 * 60 * 24)) + 1;
   const daysRemaining = daysInYear - daysElapsed;
 
-  const annualTarget = 250000;
   const bhagTarget = 800000;
+  const annualTier = (await loadAnnualTierProgressSupabase(supabase, bdrId, year, todayStr)).summary;
+  const annualGoalTarget = annualTier.threshold;
 
   return {
     closedDeals: closedDealsCount ?? 0,
@@ -727,6 +736,7 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
     expectedBonusOnCashCollected: Number((quarterlyRevenueCollected * 0.025).toFixed(2)),
     projectedQuarterlyBonus: Number((projectedCommissionByQuarter[currentQuarter] ?? 0).toFixed(2)),
     ytdPayableRevenue,
+    annualTier,
     quarterlyProgress: {
       revenueCollected: Number(quarterlyRevenueCollected.toFixed(2)),
       newBusinessCollected: Number(quarterlyNewBusinessCollected.toFixed(2)),
@@ -735,7 +745,7 @@ export async function loadDashboardStatsSupabase(supabase: any, bdrId: string, t
       bonusEligible: quarterlyRevenueCollected >= quarterlyTarget,
       target: quarterlyTarget,
     },
-    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualTarget, daysElapsed, daysRemaining),
+    annualProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, annualGoalTarget, daysElapsed, daysRemaining),
     bhagProgress: buildAnnualSlice(annualRevenue, annualNewBusiness, annualRenewalUplift, bhagTarget, daysElapsed, daysRemaining),
   };
 }

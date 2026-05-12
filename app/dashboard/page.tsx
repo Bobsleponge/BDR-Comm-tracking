@@ -5,6 +5,7 @@ import { Layout } from '@/components/shared/Layout';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { DashboardHeroKPIs } from '@/components/dashboard/DashboardHeroKPIs';
 import { DashboardStatsGrid } from '@/components/dashboard/DashboardStatsGrid';
+import { AnnualTierCommissionCard } from '@/components/dashboard/AnnualTierCommissionCard';
 import { ProjectedCommissionByQuarter } from '@/components/dashboard/ProjectedCommissionByQuarter';
 import { RecentDealsTable } from '@/components/dashboard/RecentDealsTable';
 import { TargetProgressChart } from '@/components/dashboard/TargetProgressChart';
@@ -56,6 +57,20 @@ interface DashboardStats {
   expectedBonusOnCashCollected?: number;
   projectedQuarterlyBonus?: number;
   ytdPayableRevenue?: number;
+  annualTier?: {
+    year: number;
+    threshold: number;
+    tier1Rate: number;
+    tier2Rate: number;
+    revenueCollected: number;
+    revenueInTier1: number;
+    revenueInTier2: number;
+    tier1Commission: number;
+    tier2Commission: number;
+    totalTierCommission: number;
+    remainingToThreshold: number;
+    inTier2: boolean;
+  };
 }
 
 interface Deal {
@@ -216,7 +231,7 @@ export default function DashboardPage() {
                       renewalUpliftCollected: stats.quarterlyProgress.renewalUpliftCollected,
                     }}
                     annual={stats.annualProgress ? {
-                      title: 'Annual Target ($250k)',
+                      title: `Annual Target ($${Math.round(stats.annualProgress.target ?? stats.annualTier?.threshold ?? 250000).toLocaleString('en-US')})`,
                       revenueCollected: stats.annualProgress.revenueCollected ?? 0,
                       target: stats.annualProgress.target ?? 250000,
                       achievedPercent: stats.annualProgress.achievedPercent ?? 0,
@@ -236,6 +251,12 @@ export default function DashboardPage() {
                       daysRemaining: stats.bhagProgress.daysRemaining,
                     } : undefined}
                   />
+                </div>
+              )}
+
+              {stats.annualTier && (
+                <div className="mb-6">
+                  <AnnualTierCommissionCard annualTier={stats.annualTier} />
                 </div>
               )}
 

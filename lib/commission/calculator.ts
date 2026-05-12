@@ -284,6 +284,23 @@ export function calculateTieredCommission(
 }
 
 /**
+ * Split a collection amount across tier 1 (up to threshold) and tier 2 (above threshold)
+ * using running cumulative collected revenue for the calendar year.
+ */
+export function splitRevenueAcrossTiers(
+  revenueAmount: number,
+  cumulativeRevenueBefore: number,
+  tier1Threshold: number
+): { tier1Revenue: number; tier2Revenue: number } {
+  const cumulativeAfter = cumulativeRevenueBefore + revenueAmount;
+  const belowBefore = Math.min(Math.max(cumulativeRevenueBefore, 0), tier1Threshold);
+  const belowAfter = Math.min(Math.max(cumulativeAfter, 0), tier1Threshold);
+  const tier1Revenue = belowAfter - belowBefore;
+  const tier2Revenue = revenueAmount - tier1Revenue;
+  return { tier1Revenue, tier2Revenue };
+}
+
+/**
  * Calculate renewal commission on uplift amount
  * Commission is 2.5% of the increase (renewal value - original value)
  * @param renewalValue - Total value of the renewal deal
