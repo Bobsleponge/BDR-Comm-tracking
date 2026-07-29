@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AuthGuard } from '@/components/shared/AuthGuard';
@@ -18,10 +18,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Label } from '@/components/ui/label';
+import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { FileText, Plus, Undo2 } from 'lucide-react';
+import { FileText, Plus, Undo2, Banknote } from 'lucide-react';
 
 interface CommissionSummary {
   earned: number;
@@ -63,25 +72,27 @@ export default function CommissionPage() {
   
   const [reprocessing, setReprocessing] = useState(false);
   const [generateReportLoading, setGenerateReportLoading] = useState(false);
+  const [generateReportOpen, setGenerateReportOpen] = useState(false);
+  const [reportPayableCutoff, setReportPayableCutoff] = useState(() => new Date().toISOString().split('T')[0]);
+  const [eligiblePreviewCount, setEligiblePreviewCount] = useState<number | null>(null);
+  const [eligiblePreviewLoading, setEligiblePreviewLoading] = useState(false);
   const [unapprovingId, setUnapprovingId] = useState<string | null>(null);
+  const [markingPaidId, setMarkingPaidId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'table' | 'breakdown' | 'verify'>('breakdown');
   const [filters, setFilters] = useState<{ serviceType?: string; billingType?: string }>({});
 
-  // Generate list of months: all months with commission (from breakdown) + wide fallback range
-  const getAvailableMonths = () => {
-    const months = new Set<string>();
-    // Include all months from breakdown (covers commission due in any month, including far future)
+  // Payable months are data-driven: any month with a commission entry (including far future, e.g. Aug 2027)
+  const getAvailableMonths = (): string[] => {
+    if (Array.isArray(breakdown?.payableMonths) && breakdown.payableMonths.length > 0) {
+      return breakdown.payableMonths;
+    }
     if (breakdown?.breakdown?.length) {
-      breakdown.breakdown.forEach((m: { month: string }) => months.add(m.month));
+      return breakdown.breakdown
+        .map((m: { month: string }) => m.month)
+        .filter((m: string) => m && m !== 'unknown')
+        .sort();
     }
-    // Fallback range: 2 years back to 5 years forward
-    const today = new Date();
-    for (let i = -24; i <= 60; i++) {
-      const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
-      const monthStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      months.add(monthStr);
-    }
-    return Array.from(months).sort();
+    return [];
   };
 
   const formatMonthLabel = (monthStr: string) => {
@@ -120,8 +131,8 @@ export default function CommissionPage() {
   // Use SWR for data fetching with automatic caching and revalidation
 
   const entriesUrl = selectedMonth && selectedMonth !== 'all'
-    ? `/api/commission/entries?payable_month=${selectedMonth}&include_report_adjustments=1`
-    : '/api/commission/entries?include_report_adjustments=1';
+    ? `/api/commission/entries?payable_month=${selectedMonth}&include_report_adjustments=1&limit=5000`
+    : '/api/commission/entries?include_report_adjustments=1&limit=5000';
   
   const breakdownParams = new URLSearchParams();
   if (filters.serviceType) breakdownParams.append('service_type', filters.serviceType);
@@ -155,6 +166,30 @@ export default function CommissionPage() {
 
   const batches = batchesData?.data ?? [];
 
+  const handleMarkBatchPaid = async (batchId: string) => {
+    if (!confirm('Mark this report as paid? Commission lines will show as paid in the system.')) return;
+    setMarkingPaidId(batchId);
+    try {
+      const res = await fetch(`/api/commission/batches/${batchId}/mark-paid`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const { safeJsonParse } = await import('@/lib/utils/client-helpers');
+      const data = await safeJsonParse(res);
+      if (!res.ok || data?.error) {
+        throw new Error(data?.error || 'Failed to mark as paid');
+      }
+      mutateBatches();
+      mutateSummary();
+      mutateEntries();
+      mutateBreakdown();
+    } catch (err: any) {
+      alert(err.message || 'Failed to mark as paid');
+    } finally {
+      setMarkingPaidId(null);
+    }
+  };
+
   const handleUnapprove = async (batchId: string) => {
     if (!confirm('Revert this report to draft? You will be able to edit it and approve again after fixing any issues.')) return;
     setUnapprovingId(batchId);
@@ -179,17 +214,54 @@ export default function CommissionPage() {
     }
   };
 
+  const fetchEligiblePreview = useCallback(async (cutoff: string) => {
+    setEligiblePreviewLoading(true);
+    try {
+      const res = await fetch(`/api/commission/eligible?payable_cutoff=${encodeURIComponent(cutoff)}`, {
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setEligiblePreviewCount(null);
+        return;
+      }
+      setEligiblePreviewCount(data.count ?? data.data?.length ?? 0);
+    } catch {
+      setEligiblePreviewCount(null);
+    } finally {
+      setEligiblePreviewLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!generateReportOpen) return;
+    fetchEligiblePreview(reportPayableCutoff);
+  }, [generateReportOpen, reportPayableCutoff, fetchEligiblePreview]);
+
+  const handleOpenGenerateReport = () => {
+    setReportPayableCutoff(new Date().toISOString().split('T')[0]);
+    setEligiblePreviewCount(null);
+    setGenerateReportOpen(true);
+  };
+
   const handleGenerateReport = async () => {
+    if (!reportPayableCutoff) {
+      alert('Please choose a payable-through date');
+      return;
+    }
     setGenerateReportLoading(true);
     try {
       const res = await fetch('/api/commission/batches', {
         method: 'POST',
         credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payable_cutoff: reportPayableCutoff }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Failed to generate report');
       }
+      setGenerateReportOpen(false);
       mutateBatches();
       mutateSummary();
       mutateEntries();
@@ -200,6 +272,15 @@ export default function CommissionPage() {
     } finally {
       setGenerateReportLoading(false);
     }
+  };
+
+  const formatCutoffLabel = (dateStr: string) => {
+    const [y, m, d] = dateStr.split('-');
+    return new Date(parseInt(y), parseInt(m) - 1, parseInt(d || '1')).toLocaleDateString('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    });
   };
 
   const formatRunDate = (dateStr: string) => {
@@ -345,6 +426,16 @@ export default function CommissionPage() {
   // Show loading only if we have absolutely no data
   const showFullLoading = loading && !summary && entries.length === 0 && !breakdown;
 
+  const displayBreakdown =
+    selectedMonth && selectedMonth !== 'all' && breakdown?.breakdown
+      ? breakdown.breakdown.filter((m: { month: string }) => m.month === selectedMonth)
+      : breakdown?.breakdown || [];
+
+  const displayBreakdownTotal = displayBreakdown.reduce(
+    (sum: number, m: { totalAmount: number }) => sum + Number(m.totalAmount ?? 0),
+    0
+  );
+
   return (
     <ErrorBoundary>
       <AuthGuard>
@@ -442,18 +533,55 @@ export default function CommissionPage() {
                     My Commission Reports
                   </CardTitle>
                   <p className="text-sm text-muted-foreground">
-                    Generate a report to pull eligible commissions, edit in draft, then approve and download.
+                    Draft → adjust line items and overrides → Approve and Finalize → Mark as Paid when sent.
+                    Use Adjust on an approved report to revert to draft if you need to fix something before paying.
                   </p>
                 </CardHeader>
                 <CardContent>
                   <div className="flex flex-col gap-4">
                     <Button
-                      onClick={handleGenerateReport}
+                      onClick={handleOpenGenerateReport}
                       disabled={generateReportLoading}
                     >
                       <Plus className="mr-2 h-4 w-4" />
-                      {generateReportLoading ? 'Generating...' : 'Generate My Commission Report'}
+                      Generate My Commission Report
                     </Button>
+                    <Dialog open={generateReportOpen} onOpenChange={setGenerateReportOpen}>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Generate Commission Report</DialogTitle>
+                          <DialogDescription>
+                            Choose the last payable date to include. Only entries with a payable date on or
+                            before this date will be pulled into the report — for example, use May 31 when
+                            preparing your May invoice.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="space-y-2 py-2">
+                          <Label htmlFor="report-payable-cutoff">Include commissions payable through</Label>
+                          <Input
+                            id="report-payable-cutoff"
+                            type="date"
+                            value={reportPayableCutoff}
+                            onChange={(e) => setReportPayableCutoff(e.target.value)}
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            {eligiblePreviewLoading
+                              ? 'Checking eligible entries...'
+                              : eligiblePreviewCount != null
+                                ? `${eligiblePreviewCount} eligible ${eligiblePreviewCount === 1 ? 'entry' : 'entries'} payable on or before ${formatCutoffLabel(reportPayableCutoff)}`
+                                : `Entries payable on or before ${formatCutoffLabel(reportPayableCutoff)} will be included`}
+                          </p>
+                        </div>
+                        <DialogFooter>
+                          <Button variant="outline" onClick={() => setGenerateReportOpen(false)}>
+                            Cancel
+                          </Button>
+                          <Button onClick={handleGenerateReport} disabled={generateReportLoading || !reportPayableCutoff}>
+                            {generateReportLoading ? 'Generating...' : 'Generate Report'}
+                          </Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
                     {batches.length > 0 && (
                       <div>
                         <h4 className="text-sm font-medium mb-2">Recent Reports</h4>
@@ -472,7 +600,15 @@ export default function CommissionPage() {
                               <TableRow key={b.id}>
                                 <TableCell>{formatRunDate(b.run_date)}</TableCell>
                                 <TableCell>
-                                  <Badge variant={b.status === 'draft' ? 'secondary' : 'default'}>
+                                  <Badge
+                                    variant={
+                                      b.status === 'draft'
+                                        ? 'secondary'
+                                        : b.status === 'paid'
+                                          ? 'default'
+                                          : 'outline'
+                                    }
+                                  >
                                     {b.status}
                                   </Badge>
                                 </TableCell>
@@ -481,19 +617,34 @@ export default function CommissionPage() {
                                 <TableCell className="text-right">
                                   <div className="flex items-center justify-end gap-2">
                                     {b.status === 'approved' && (
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={(e) => {
-                                          e.preventDefault();
-                                          handleUnapprove(b.id);
-                                        }}
-                                        disabled={!!unapprovingId}
-                                        title="Revert to draft to fix issues"
-                                      >
-                                        <Undo2 className="mr-1 h-3.5 w-3.5" />
-                                        {unapprovingId === b.id ? 'Reverting...' : 'Revert'}
-                                      </Button>
+                                      <>
+                                        <Button
+                                          variant="default"
+                                          size="sm"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            handleMarkBatchPaid(b.id);
+                                          }}
+                                          disabled={!!markingPaidId || !!unapprovingId}
+                                          title="Record that payment was sent"
+                                        >
+                                          <Banknote className="mr-1 h-3.5 w-3.5" />
+                                          {markingPaidId === b.id ? 'Marking...' : 'Mark Paid'}
+                                        </Button>
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            handleUnapprove(b.id);
+                                          }}
+                                          disabled={!!unapprovingId || !!markingPaidId}
+                                          title="Revert to draft to adjust, then approve again"
+                                        >
+                                          <Undo2 className="mr-1 h-3.5 w-3.5" />
+                                          {unapprovingId === b.id ? 'Reverting...' : 'Adjust'}
+                                        </Button>
+                                      </>
                                     )}
                                     <Link href={`/commission/batches/${b.id}`}>
                                       <Button variant="ghost" size="sm">
@@ -521,8 +672,8 @@ export default function CommissionPage() {
                 <TabsContent value="breakdown">
                   {breakdown ? (
                     <CommissionBreakdown
-                      breakdown={breakdown.breakdown || []}
-                      total={breakdown.total || 0}
+                      breakdown={displayBreakdown}
+                      total={selectedMonth !== 'all' ? displayBreakdownTotal : breakdown.total || 0}
                       onFilterChange={(newFilters) => {
                         setFilters(newFilters);
                       }}

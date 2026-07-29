@@ -4,7 +4,7 @@ If your website is taking minutes to load, use these tools to diagnose the issue
 
 ## 1. Check Database Health
 
-Visit: `http://localhost:3000/api/debug/db-health` (as admin)
+Visit: `http://localhost:3001/api/debug/db-health` (as admin)
 
 This will show:
 - Database file size (large files = slow)
@@ -15,7 +15,7 @@ This will show:
 
 ## 2. View Slow Queries
 
-Visit: `http://localhost:3000/api/debug/performance` (as admin)
+Visit: `http://localhost:3001/api/debug/performance` (as admin)
 
 This shows all queries taking more than 100ms. Look for:
 - Queries taking > 1000ms (very slow)

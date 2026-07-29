@@ -8,7 +8,7 @@ All API endpoints require authentication. The system uses Supabase Auth with ema
 
 ## Base URL
 
-- Development: `http://localhost:3000/api`
+- Development: `http://localhost:3001/api`
 - Production: `https://your-domain.vercel.app/api`
 
 ## Endpoints

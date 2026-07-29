@@ -14,7 +14,8 @@ import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { format } from 'date-fns';
-import { ArrowLeft, Download, Check, Trash2, Undo2, PlusCircle } from 'lucide-react';
+import { ArrowLeft, Download, Check, Trash2, Undo2, PlusCircle, EyeOff, Banknote, Upload } from 'lucide-react';
+import { ImportBossUpdateDialog } from '@/components/commission/ImportBossUpdateDialog';
 
 interface BatchItem {
   id: string;
@@ -22,9 +23,10 @@ interface BatchItem {
   override_amount: number | null;
   override_payment_date: string | null;
   override_commission_rate: number | null;
+  override_amount_collected?: number | null;
   adjustment_note: string | null;
-  amount: number;
-  amount_collected: number;
+  amount: number | null;
+  amount_collected: number | null;
   commissionable_value?: number | null;
   is_renewal: boolean;
   previous_deal_amount: number | null;
@@ -34,6 +36,7 @@ interface BatchItem {
   service_name: string;
   commission_rate: number | null;
   billing_type: string;
+  payment_sequence?: string;
   collection_date: string;
   payable_date: string | null;
   accrual_date: string | null;
@@ -50,6 +53,7 @@ interface Batch {
   bdr_id: string;
   bdr_name?: string;
   run_date: string;
+  payable_cutoff?: string | null;
   status: 'draft' | 'approved' | 'paid';
   created_at: string;
   items: BatchItem[];
@@ -75,8 +79,10 @@ export default function CommissionBatchDetailPage() {
   const [editingNote, setEditingNote] = useState<Record<string, string>>({});
   const [editingPaymentDate, setEditingPaymentDate] = useState<Record<string, string>>({});
   const [editingCommissionRate, setEditingCommissionRate] = useState<Record<string, string>>({});
+  const [editingAmountClaimed, setEditingAmountClaimed] = useState<Record<string, string>>({});
   const [renewalOverrideEntryId, setRenewalOverrideEntryId] = useState<string | null>(null);
   const [renewalPreviousAmount, setRenewalPreviousAmount] = useState<Record<string, string>>({});
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const id = params.id as string;
 
@@ -89,6 +95,7 @@ export default function CommissionBatchDetailPage() {
         const noteMap: Record<string, string> = {};
         const paymentDateMap: Record<string, string> = {};
         const commissionRateMap: Record<string, string> = {};
+        const amountClaimedMap: Record<string, string> = {};
         (data.items || []).forEach((item: BatchItem) => {
           if (item.override_amount != null) {
             overrideMap[item.commission_entry_id] = String(item.override_amount);
@@ -102,11 +109,15 @@ export default function CommissionBatchDetailPage() {
           if (item.override_commission_rate != null) {
             commissionRateMap[item.commission_entry_id] = String((item.override_commission_rate * 100).toFixed(2));
           }
+          if (item.amount_collected != null && item.amount_collected > 0) {
+            amountClaimedMap[item.commission_entry_id] = String(item.amount_collected);
+          }
         });
         setEditingOverride(overrideMap);
         setEditingNote(noteMap);
         setEditingPaymentDate(paymentDateMap);
         setEditingCommissionRate(commissionRateMap);
+        setEditingAmountClaimed(amountClaimedMap);
       } catch (err: any) {
         setError(err.message || 'Failed to fetch batch');
       } finally {
@@ -132,6 +143,28 @@ export default function CommissionBatchDetailPage() {
       router.refresh();
       const data = await fetcher(`/api/commission/batches/${id}`);
       setBatch(data);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleMarkPaid = async () => {
+    if (!confirm('Mark this report as paid? Commission lines will show as paid in the system.')) return;
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/commission/batches/${id}/mark-paid`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || 'Failed to mark as paid');
+      }
+      const fresh = await fetcher(`/api/commission/batches/${id}?t=${Date.now()}`);
+      setBatch(fresh);
+      router.refresh();
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -235,6 +268,35 @@ export default function CommissionBatchDetailPage() {
     }
   };
 
+  const handleIgnoreEntry = async (entryId: string) => {
+    if (
+      !confirm(
+        'Ignore this commission entry permanently? It will be removed from this report and will never appear in future reports. Future commission payments for this deal will still be claimable.'
+      )
+    ) {
+      return;
+    }
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/commission/batches/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ action: 'ignore_entry', commission_entry_id: entryId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to ignore entry');
+      }
+      const data = await fetcher(`/api/commission/batches/${id}`);
+      setBatch(data);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleSaveOverride = async (entryId: string) => {
     const val = editingOverride[entryId];
     const num = val === '' ? null : parseFloat(val);
@@ -273,9 +335,12 @@ export default function CommissionBatchDetailPage() {
         credentials: 'include',
         body: JSON.stringify({ action: 'update_payment_date', commission_entry_id: entryId, override_payment_date: val }),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to save');
+      }
+      if (data.removed) {
+        alert(data.message || 'Entry moved to a future report — it will appear on your next pull.');
       }
       const freshBatch = await fetcher(`/api/commission/batches/${id}`);
       setBatch(freshBatch);
@@ -289,6 +354,45 @@ export default function CommissionBatchDetailPage() {
         }
         return next;
       });
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSaveAmountClaimed = async (entryId: string) => {
+    const val = editingAmountClaimed[entryId]?.trim();
+    const num = val === '' || val == null ? null : parseFloat(val);
+    if (val !== '' && val != null && (isNaN(num!) || num! < 0)) {
+      alert('Please enter a valid non-negative amount');
+      return;
+    }
+    setActionLoading(true);
+    try {
+      const res = await fetch(`/api/commission/batches/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          action: 'update_amount_claimed',
+          commission_entry_id: entryId,
+          override_amount_collected: num,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to save');
+      }
+      const data = await fetcher(`/api/commission/batches/${id}`);
+      setBatch(data);
+      const amountClaimedMap: Record<string, string> = {};
+      (data.items || []).forEach((item: BatchItem) => {
+        if (item.amount_collected != null && item.amount_collected > 0) {
+          amountClaimedMap[item.commission_entry_id] = String(item.amount_collected);
+        }
+      });
+      setEditingAmountClaimed(amountClaimedMap);
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -406,6 +510,12 @@ export default function CommissionBatchDetailPage() {
     window.open(`/api/commission/batches/${id}/export?format=${format}`, '_blank');
   };
 
+  const refreshBatch = async () => {
+    const data = await fetcher(`/api/commission/batches/${id}?t=${Date.now()}`);
+    setBatch(data);
+    router.refresh();
+  };
+
   if (loading) {
     return (
       <ErrorBoundary>
@@ -444,6 +554,11 @@ export default function CommissionBatchDetailPage() {
   }
 
   const isDraft = batch.status === 'draft';
+  const isApproved = batch.status === 'approved';
+  const isPaid = batch.status === 'paid';
+
+  const formatMoney = (value: number | null | undefined): string =>
+    value != null && !Number.isNaN(value) ? `$${Number(value).toFixed(2)}` : '—';
 
   const getFinalAmount = (item: BatchItem): number => {
     if (item.override_amount != null) return item.override_amount;
@@ -507,14 +622,21 @@ export default function CommissionBatchDetailPage() {
                 <div>
                   <h2 className="text-2xl font-bold">Commission Report</h2>
                   <p className="text-muted-foreground">
-                    Run date: {batch.run_date ? format(new Date(batch.run_date), 'MMM d, yyyy') : '—'}
+                    Payable through:{' '}
+                    {(batch.payable_cutoff || batch.run_date)
+                      ? (() => {
+                          const raw = (batch.payable_cutoff || batch.run_date).slice(0, 10);
+                          const [y, m, d] = raw.split('-');
+                          return format(new Date(parseInt(y), parseInt(m) - 1, parseInt(d || '1')), 'MMM d, yyyy');
+                        })()
+                      : '—'}
                     {batch.bdr_name && ` • ${batch.bdr_name}`}
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant={isDraft ? 'secondary' : 'default'}>
-                  {batch.status}
+                <Badge variant={isDraft ? 'secondary' : isPaid ? 'default' : 'outline'}>
+                  {isPaid ? 'paid' : batch.status}
                 </Badge>
                 {isDraft && (
                   <>
@@ -527,6 +649,16 @@ export default function CommissionBatchDetailPage() {
                     >
                       <PlusCircle className="mr-2 h-4 w-4" />
                       Add missing entries
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setImportDialogOpen(true)}
+                      disabled={actionLoading || (batch.items?.length ?? 0) === 0}
+                      title="Import annotated report returned by your boss"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      Import Boss Update
                     </Button>
                     <Button
                       variant="outline"
@@ -567,6 +699,16 @@ export default function CommissionBatchDetailPage() {
                 )}
                 {!isDraft && (
                   <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setImportDialogOpen(true)}
+                      disabled={actionLoading || (batch.items?.length ?? 0) === 0}
+                      title="Preview boss feedback (revert to draft to apply)"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      Import Boss Update
+                    </Button>
                     <Button onClick={() => handleDownload('xlsx')} variant="default">
                       <Download className="mr-2 h-4 w-4" />
                       Download Excel
@@ -574,17 +716,27 @@ export default function CommissionBatchDetailPage() {
                     <Button onClick={() => handleDownload('csv')} variant="outline">
                       Download CSV
                     </Button>
-                    {batch.status === 'approved' && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleUnapprove}
-                        disabled={actionLoading}
-                        title="Revert to draft to fix issues and re-approve"
-                      >
-                        <Undo2 className="mr-2 h-4 w-4" />
-                        Revert to Draft
-                      </Button>
+                    {isApproved && (
+                      <>
+                        <Button
+                          onClick={handleMarkPaid}
+                          disabled={actionLoading}
+                          title="Record that payment was sent for this report"
+                        >
+                          <Banknote className="mr-2 h-4 w-4" />
+                          Mark as Paid
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleUnapprove}
+                          disabled={actionLoading}
+                          title="Revert to draft to adjust line items, then approve again"
+                        >
+                          <Undo2 className="mr-2 h-4 w-4" />
+                          Revert to Draft
+                        </Button>
+                      </>
                     )}
                   </>
                 )}
@@ -607,6 +759,7 @@ export default function CommissionBatchDetailPage() {
                       <TableRow>
                         <TableHead>Client</TableHead>
                         <TableHead>Deal</TableHead>
+                        <TableHead>Payment</TableHead>
                         <TableHead>Payable date</TableHead>
                         <TableHead>Amount claimed on</TableHead>
                         <TableHead>Is renewal</TableHead>
@@ -628,7 +781,7 @@ export default function CommissionBatchDetailPage() {
                         return (
                           <Fragment key={month}>
                             <TableRow className="bg-muted/50 hover:bg-muted/50">
-                              <TableCell colSpan={isDraft ? 14 : 13} className="font-semibold py-3">
+                              <TableCell colSpan={isDraft ? 15 : 14} className="font-semibold py-3">
                                 {formatMonthHeading(month)} — ${monthTotal.toFixed(2)}
                               </TableCell>
                             </TableRow>
@@ -653,6 +806,9 @@ export default function CommissionBatchDetailPage() {
                                   <TableRow className={rowHighlight}>
                             <TableCell>{item.client_name}</TableCell>
                             <TableCell>{dealLabel}</TableCell>
+                            <TableCell className="whitespace-nowrap text-sm font-medium">
+                              {item.payment_sequence || '1 of 1'}
+                            </TableCell>
                             <TableCell>
                               {isDraft ? (
                                 <div className="flex items-center gap-2">
@@ -678,7 +834,41 @@ export default function CommissionBatchDetailPage() {
                               )}
                             </TableCell>
                             <TableCell>
-                              {(item.amount_collected ?? 0) > 0 ? `$${Number(item.amount_collected).toFixed(2)}` : '—'}
+                              {isDraft ? (
+                                <div className="flex items-center gap-2">
+                                  <Input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    placeholder="Enter amount"
+                                    className="w-28"
+                                    value={
+                                      editingAmountClaimed[item.commission_entry_id] ??
+                                      (item.amount_collected != null && item.amount_collected > 0
+                                        ? String(item.amount_collected)
+                                        : '')
+                                    }
+                                    onChange={(e) =>
+                                      setEditingAmountClaimed((prev) => ({
+                                        ...prev,
+                                        [item.commission_entry_id]: e.target.value,
+                                      }))
+                                    }
+                                  />
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleSaveAmountClaimed(item.commission_entry_id)}
+                                    disabled={actionLoading}
+                                  >
+                                    Save
+                                  </Button>
+                                </div>
+                              ) : (item.amount_collected ?? 0) > 0 ? (
+                                formatMoney(item.amount_collected)
+                              ) : (
+                                '—'
+                              )}
                             </TableCell>
                             <TableCell>{item.is_renewal ? 'Yes' : 'No'}</TableCell>
                             <TableCell>
@@ -720,7 +910,7 @@ export default function CommissionBatchDetailPage() {
                                 commissionPct
                               )}
                             </TableCell>
-                            <TableCell>${item.amount.toFixed(2)}</TableCell>
+                            <TableCell>{formatMoney(item.amount)}</TableCell>
                             <TableCell>
                               {isDraft ? (
                                 <div className="flex items-center gap-2">
@@ -747,7 +937,7 @@ export default function CommissionBatchDetailPage() {
                                 item.override_amount != null ? `$${item.override_amount.toFixed(2)}` : '—'
                               )}
                             </TableCell>
-                            <TableCell>${finalAmt.toFixed(2)}</TableCell>
+                            <TableCell>{formatMoney(finalAmt)}</TableCell>
                             <TableCell className="align-top">
                               {!item.change_summary && !item.is_adjusted && !adjustedDisplay ? (
                                 '—'
@@ -808,9 +998,21 @@ export default function CommissionBatchDetailPage() {
                                   <Button
                                     size="sm"
                                     variant="ghost"
+                                    className="h-7 text-muted-foreground"
+                                    onClick={() => handleIgnoreEntry(item.commission_entry_id)}
+                                    disabled={actionLoading}
+                                    title="Permanently waive this payment — future payments for this deal remain claimable"
+                                  >
+                                    <EyeOff className="mr-1 h-3.5 w-3.5" />
+                                    Ignore
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
                                     className="text-destructive hover:text-destructive h-7"
                                     onClick={() => handleRemoveEntry(item.commission_entry_id)}
                                     disabled={actionLoading}
+                                    title="Remove from this report only — will appear in your next pull"
                                   >
                                     Remove
                                   </Button>
@@ -893,6 +1095,15 @@ export default function CommissionBatchDetailPage() {
                 )}
               </CardContent>
             </Card>
+
+            <ImportBossUpdateDialog
+              batchId={id}
+              batchStatus={batch.status}
+              open={importDialogOpen}
+              onOpenChange={setImportDialogOpen}
+              onApplied={refreshBatch}
+              onRevertToDraft={handleUnapprove}
+            />
           </div>
         </Layout>
       </AuthGuard>

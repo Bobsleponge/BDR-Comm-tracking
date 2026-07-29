@@ -3,11 +3,14 @@
  * Used for snapshot (approve), export, and display.
  */
 
+import { buildPaymentSequenceMapLocal, lookupPaymentSequence } from '@/lib/commission/enrich-payment-sequence';
+
 /** Supabase nested item shape from batch_items select */
 export interface SupabaseBatchItem {
   override_amount?: number | null;
   override_payment_date?: string | null;
   override_commission_rate?: number | null;
+  override_amount_collected?: number | null;
   commission_entries?: {
     amount?: number;
     payable_date?: string | null;
@@ -31,6 +34,7 @@ export interface SupabaseBatchItem {
 export interface ExportRow {
   client_name: string;
   deal: string;
+  payment_sequence: string;
   payable_date: string;
   amount_claimed_on: string;
   is_renewal: string;
@@ -46,6 +50,9 @@ export interface BatchItemRaw {
   override_amount?: number | null;
   override_payment_date?: string | null;
   override_commission_rate?: number | null;
+  override_amount_collected?: number | null;
+  /** Revenue event amount before report override (for change summaries). */
+  baseline_amount_collected?: number | null;
   original_amount?: number | null;
   payable_date?: string | null;
   accrual_date?: string | null;
@@ -62,6 +69,15 @@ export interface BatchItemRaw {
   re_billing_type?: string | null;
   collection_date?: string | null;
   amount_collected?: number | null;
+  revenue_event_id?: string | null;
+  service_id?: string | null;
+  service_billing_type?: string | null;
+  contract_months?: number | null;
+  contract_quarters?: number | null;
+  service_completion_date?: string | null;
+  /** Precomputed e.g. "3 of 12" */
+  payment_sequence?: string | null;
+  commission_entry_id?: string | null;
 }
 
 /** Batch item source row + ids/timestamps for approve-time snapshot (not exported to Excel). */
@@ -86,12 +102,32 @@ function normYyyyMmDd(s: string | null | undefined): string {
   return t.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : t;
 }
 
+/** Effective amount claimed on for export/display (report override wins). */
+export function effectiveAmountCollected(
+  override: number | null | undefined,
+  fromRevenue: number | null | undefined
+): number | null {
+  if (override != null && !Number.isNaN(Number(override))) return Number(override);
+  if (fromRevenue != null && !Number.isNaN(Number(fromRevenue))) return Number(fromRevenue);
+  return null;
+}
+
 /** Human-readable summary of overrides vs system values (UI only). */
 export function buildChangeSummary(raw: SnapshotItemInput): string {
   const parts: string[] = [];
   const origAmt = raw.original_amount;
-  const amtCollected = raw.amount_collected ?? 0;
+  const amtCollected = effectiveAmountCollected(raw.override_amount_collected, raw.amount_collected) ?? 0;
   const baseRate = raw.commission_rate != null ? Number(raw.commission_rate) : null;
+
+  if (raw.override_amount_collected != null) {
+    const baseline = raw.baseline_amount_collected ?? raw.amount_collected ?? 0;
+    const claimed = Number(raw.override_amount_collected);
+    if (baseline > 0 && Math.abs(claimed - Number(baseline)) >= 0.02) {
+      parts.push(`Amount claimed on $${Number(baseline).toFixed(2)} → $${claimed.toFixed(2)}`);
+    } else {
+      parts.push(`Amount claimed on set to $${claimed.toFixed(2)}`);
+    }
+  }
 
   if (raw.override_amount != null) {
     const oa = Number(raw.override_amount);
@@ -147,6 +183,7 @@ export function computeSnapshotAdjustmentFields(raw: SnapshotItemInput): {
     change_summary !== '' ||
     !!raw.adjustment_note?.trim() ||
     raw.override_amount != null ||
+    raw.override_amount_collected != null ||
     !!raw.override_payment_date ||
     raw.override_commission_rate != null;
   return {
@@ -176,6 +213,7 @@ export function snapshotRowsToExportRows(rows: Array<ExportRow | CommissionSnaps
   return rows.map((r) => ({
     client_name: r.client_name,
     deal: r.deal,
+    payment_sequence: r.payment_sequence ?? '',
     payable_date: r.payable_date,
     amount_claimed_on: r.amount_claimed_on,
     is_renewal: r.is_renewal,
@@ -221,9 +259,9 @@ export function mergeSnapshotsIntoAdjustmentMap(
 export function buildExportRows(items: BatchItemRaw[]): ExportRow[] {
   const out = items.map((i) => {
     const originalAmount = i.original_amount ?? 0;
-    const isAmountTbd = i.original_amount == null && i.amount_collected == null;
+    const isAmountTbd = i.original_amount == null && effectiveAmountCollected(i.override_amount_collected, i.amount_collected) == null;
     const overrideAmount = i.override_amount;
-    const amountCollected = i.amount_collected ?? 0;
+    const amountCollected = effectiveAmountCollected(i.override_amount_collected, i.amount_collected) ?? 0;
     const displayRate = i.override_commission_rate ?? i.commission_rate;
     let finalAmount = overrideAmount;
     if (finalAmount == null && i.override_commission_rate != null && amountCollected > 0) {
@@ -280,6 +318,7 @@ export function buildExportRows(items: BatchItemRaw[]): ExportRow[] {
     return {
       client_name: i.client_name ?? '',
       deal: dealLabel,
+      payment_sequence: i.payment_sequence ?? '',
       payable_date: paymentDate,
       amount_claimed_on: claimedOn,
       is_renewal: isRenewal ? 'Yes' : 'No',
@@ -329,6 +368,7 @@ export interface BatchItemDisplay {
   service_name: string;
   commission_rate: number | null;
   billing_type: string;
+  payment_sequence: string;
   collection_date: string;
   amount_collected: number;
   commissionable_value: number | null;
@@ -360,6 +400,7 @@ function exportRowToBatchItemDisplay(r: ExportRow, batchId: string, entryIdSuffi
     service_name: r.deal,
     commission_rate: r.commission_pct ? parseFloat(r.commission_pct.replace('%', '')) / 100 : null,
     billing_type: '',
+    payment_sequence: r.payment_sequence || '1 of 1',
     collection_date: r.amount_claimed_on || '',
     amount_collected: r.amount_claimed_on ? parseFloat(r.amount_claimed_on) : 0,
     commissionable_value: r.new_deal_amount ? parseFloat(r.new_deal_amount) : null,
@@ -411,6 +452,8 @@ export function flattenSupabaseItem(item: SupabaseBatchItem): BatchItemRaw {
     override_amount: item.override_amount,
     override_payment_date: item.override_payment_date,
     override_commission_rate: item.override_commission_rate,
+    override_amount_collected: item.override_amount_collected,
+    baseline_amount_collected: reObj?.amount_collected,
     original_amount: ceObj?.amount != null ? ceObj.amount : null,
     payable_date: ceObj?.payable_date,
     accrual_date: ceObj?.accrual_date,
@@ -426,6 +469,26 @@ export function flattenSupabaseItem(item: SupabaseBatchItem): BatchItemRaw {
     commissionable_value: dsObj?.commissionable_value,
     re_billing_type: reObj?.billing_type,
     collection_date: reObj?.collection_date,
-    amount_collected: reObj?.amount_collected,
+    amount_collected: effectiveAmountCollected(item.override_amount_collected, reObj?.amount_collected),
   };
+}
+
+/** Attach payment_sequence labels to batch export rows (local DB). */
+export function attachPaymentSequencesToBatchItems(
+  db: import('better-sqlite3').Database,
+  items: BatchItemRaw[]
+): BatchItemRaw[] {
+  const lines = items.map((i, idx) => ({
+    commission_entry_id: i.commission_entry_id ?? `batch-row-${idx}`,
+    revenue_event_id: i.revenue_event_id ?? null,
+    service_id: i.service_id ?? null,
+  }));
+  const map = buildPaymentSequenceMapLocal(db, lines);
+  return items.map((i, idx) => {
+    const entryKey = i.commission_entry_id ?? `batch-row-${idx}`;
+    return {
+      ...i,
+      payment_sequence: lookupPaymentSequence(map, i.revenue_event_id ?? null, entryKey).label,
+    };
+  });
 }

@@ -3,6 +3,8 @@ import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, canAccessBdr } from '@/lib/utils/api-helpers';
 import { parseISO, addDays, format } from 'date-fns';
 import { dealUpdateSchema } from '@/lib/commission/validators';
+import { dealUpdateAffectsCommission } from '@/lib/commission/commission-affecting';
+import { safeReprocessDeal } from '@/lib/commission/safe-reprocess';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -218,27 +220,15 @@ export async function PATCH(
           db.prepare('UPDATE deals SET deal_value = ? WHERE id = ?').run(totalValue, id);
         }
 
-        // Reprocess deal: remove all commission entries and revenue events, recreate as if new deal
-        const services = db.prepare('SELECT id FROM deal_services WHERE deal_id = ?').all(id) as any[];
-        if (services.length > 0) {
-          db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(id);
-          db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(id);
-        }
       })();
 
-      // Recreate revenue events and commission entries (async, outside transaction)
       const services = db.prepare('SELECT id FROM deal_services WHERE deal_id = ?').all(id) as any[];
-      if (services.length > 0) {
-        const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
-        await createRevenueEventsForDeal(id);
-        const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(id) as Array<{ id: string }>;
-        for (const ev of revenueEvents) {
-          try {
-            await processRevenueEvent(ev.id);
-          } catch {
-            // Ignore individual processing errors
-          }
-        }
+      const shouldReprocess =
+        services.length > 0 &&
+        dealUpdateAffectsCommission(body, deal, firstInvoiceDate ?? undefined);
+
+      if (shouldReprocess) {
+        await safeReprocessDeal(id);
       }
 
       // Fetch updated deal with services
@@ -317,25 +307,17 @@ export async function PATCH(
       return apiError(error.message, 500);
     }
 
-    // Reprocess deal: remove all commission entries and revenue events, recreate as if new deal
     const { data: dealServices } = await (supabase as any)
       .from('deal_services')
       .select('id')
       .eq('deal_id', id);
-    if (dealServices && dealServices.length > 0) {
-      const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
-      await (supabase as any).from('commission_entries').delete().eq('deal_id', id);
-      await (supabase as any).from('revenue_events').delete().eq('deal_id', id);
-      await createRevenueEventsForDeal(id);
-      const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', id);
-      const revenueEvents = eventsResult.data || [];
-      for (const ev of revenueEvents) {
-        try {
-          await processRevenueEvent(ev.id);
-        } catch {
-          // Ignore individual processing errors
-        }
-      }
+    const shouldReprocess =
+      dealServices &&
+      dealServices.length > 0 &&
+      dealUpdateAffectsCommission(body, existingDeal, updateBody.first_invoice_date ?? undefined);
+
+    if (shouldReprocess) {
+      await safeReprocessDeal(id);
     }
 
     // Fetch services

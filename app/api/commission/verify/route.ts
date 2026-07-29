@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
+import { getEntryEffectiveMonth } from '@/lib/commission/entry-month';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -21,7 +22,7 @@ export interface ServiceVerification {
     hasCommissionEntry: boolean;
     commissionAmount: number | null;
   }[];
-  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count';
+  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count' | 'ok_with_approved';
   message: string;
 }
 
@@ -32,8 +33,12 @@ export interface DealVerification {
   expectedTotal: number;
   accruedTotal: number;
   pendingTotal: number;
+  approvedTotal: number;
+  outstandingExpected: number;
+  outstandingAccrued: number;
+  approvedMonths: string[];
   services: ServiceVerification[];
-  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count';
+  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count' | 'ok_with_approved';
   message: string;
   hasOverride: boolean;
 }
@@ -94,6 +99,12 @@ export async function GET(request: NextRequest) {
       let allOk = true;
 
       for (const deal of deals) {
+        const fpRows = db.prepare(`
+          SELECT effective_date, amount FROM approved_commission_fingerprints WHERE deal_id = ?
+        `).all(deal.id) as Array<{ effective_date: string; amount: number }>;
+        const approvedMonths = new Set(fpRows.map((r) => r.effective_date.slice(0, 7)));
+        const approvedTotal = fpRows.reduce((sum, r) => sum + Number(r.amount), 0);
+
         const services = db.prepare('SELECT * FROM deal_services WHERE deal_id = ?').all(deal.id) as any[];
 
         const serviceVerifications: ServiceVerification[] = [];
@@ -102,6 +113,9 @@ export async function GET(request: NextRequest) {
         let dealPending = 0;
         let dealStatus: DealVerification['status'] = 'ok';
         let dealMessage = '';
+        let totalExpectedEntries = 0;
+        let totalActualEntries = 0;
+        let missingPastCount = 0;
 
         for (const service of services) {
           // Expected commission entry count by billing type
@@ -139,9 +153,22 @@ export async function GET(request: NextRequest) {
           const eventDetails: ServiceVerification['revenueEvents'] = [];
 
           for (const re of revenueEvents) {
-            const ce = db.prepare('SELECT id, amount FROM commission_entries WHERE revenue_event_id = ?').get(re.id) as { id: string; amount: number } | undefined;
+            const ce = db.prepare(`
+              SELECT id, amount, payable_date, accrual_date, month
+              FROM commission_entries WHERE revenue_event_id = ?
+            `).get(re.id) as {
+              id: string;
+              amount: number;
+              payable_date: string | null;
+              accrual_date: string | null;
+              month: string | null;
+            } | undefined;
             const hasEntry = !!ce;
             const commissionAmount = ce ? Number(ce.amount) : null;
+            const entryMonth = ce
+              ? getEntryEffectiveMonth(ce.payable_date, ce.accrual_date, ce.month)
+              : null;
+            const isApprovedMonth = entryMonth ? approvedMonths.has(entryMonth) : false;
             const rate = service.commission_rate ?? defaultRate;
             const expectedForEvent = re.amount_collected * rate;
             expectedCommission += expectedForEvent;
@@ -149,10 +176,9 @@ export async function GET(request: NextRequest) {
             if (hasEntry) {
               accruedCommission += Number(ce!.amount);
             } else if (re.collection_date <= today) {
-              // Past due but no commission entry - missing!
+              missingPastCount++;
               pendingCommission += expectedForEvent;
             } else {
-              // Future - not yet due
               pendingCommission += expectedForEvent;
             }
 
@@ -162,18 +188,20 @@ export async function GET(request: NextRequest) {
               collectionDate: re.collection_date,
               paymentStage: re.payment_stage,
               hasCommissionEntry: hasEntry,
-              commissionAmount,
+              commissionAmount: isApprovedMonth && !hasEntry ? null : commissionAmount,
             });
           }
 
           dealExpected += expectedCommission;
           dealAccrued += accruedCommission;
           dealPending += pendingCommission;
+          totalExpectedEntries += expectedEntryCount;
 
           const actualEntryCount = revenueEvents.filter(re => {
             const ce = db.prepare('SELECT 1 FROM commission_entries WHERE revenue_event_id = ?').get(re.id);
             return !!ce;
           }).length;
+          totalActualEntries += actualEntryCount;
 
           let status: ServiceVerification['status'] = 'ok';
           let message = '';
@@ -224,7 +252,50 @@ export async function GET(request: NextRequest) {
           });
         }
 
-        if (dealStatus === 'ok' && dealPending > 0) {
+        const liveEntries = db.prepare(`
+          SELECT amount, payable_date, accrual_date, month
+          FROM commission_entries WHERE deal_id = ?
+        `).all(deal.id) as Array<{
+          amount: number;
+          payable_date: string | null;
+          accrual_date: string | null;
+          month: string | null;
+        }>;
+        let outstandingAccrued = 0;
+        for (const ce of liveEntries) {
+          const month = getEntryEffectiveMonth(ce.payable_date, ce.accrual_date, ce.month);
+          if (!month || !approvedMonths.has(month)) {
+            outstandingAccrued += Number(ce.amount);
+          }
+        }
+        const outstandingExpected = Math.max(0, dealExpected - approvedTotal);
+
+        if (approvedMonths.size > 0) {
+          if (dealStatus === 'wrong_count' && totalActualEntries + approvedMonths.size >= totalExpectedEntries) {
+            dealStatus = 'ok';
+          }
+          if (dealStatus === 'missing_entries' && missingPastCount <= approvedMonths.size) {
+            dealStatus = 'ok_with_approved';
+          }
+          const outstandingDiff = Math.abs(outstandingAccrued + dealPending - outstandingExpected);
+          if (
+            ['ok', 'pending', 'ok_with_approved'].includes(dealStatus) &&
+            outstandingDiff <= 0.02
+          ) {
+            dealStatus = approvedMonths.size > 0 ? 'ok_with_approved' : dealStatus;
+          } else if (dealStatus === 'mismatch' && outstandingDiff <= 0.02 && approvedMonths.size > 0) {
+            dealStatus = 'ok_with_approved';
+            allOk = true;
+          }
+        }
+
+        if (dealStatus === 'ok_with_approved') {
+          dealMessage = `$${approvedTotal.toFixed(2)} approved (locked) · $${outstandingAccrued.toFixed(2)} outstanding accrued`;
+          if (dealPending > 0) {
+            dealMessage += ` · $${dealPending.toFixed(2)} pending`;
+          }
+          allOk = true;
+        } else if (dealStatus === 'ok' && dealPending > 0) {
           dealMessage = `${dealAccrued.toFixed(2)} accrued, ${dealPending.toFixed(2)} pending`;
         } else if (dealStatus === 'wrong_count') {
           dealMessage = 'Incorrect number of commission entries for one or more services';
@@ -232,6 +303,9 @@ export async function GET(request: NextRequest) {
           dealMessage = 'Some revenue events missing commission entries';
         } else if (dealStatus === 'mismatch') {
           dealMessage = `Expected ${dealExpected.toFixed(2)}, accrued ${dealAccrued.toFixed(2)}, pending ${dealPending.toFixed(2)}`;
+          if (approvedMonths.size > 0) {
+            dealMessage += ` · Approved locked $${approvedTotal.toFixed(2)}, outstanding expected $${outstandingExpected.toFixed(2)}`;
+          }
         }
 
         const hasOverride = !!(db.prepare(`
@@ -251,6 +325,10 @@ export async function GET(request: NextRequest) {
           expectedTotal: dealExpected,
           accruedTotal: dealAccrued,
           pendingTotal: dealPending,
+          approvedTotal,
+          outstandingExpected,
+          outstandingAccrued,
+          approvedMonths: [...approvedMonths].sort(),
           services: serviceVerifications,
           status: dealStatus,
           message: dealMessage,
@@ -263,7 +341,7 @@ export async function GET(request: NextRequest) {
         summary: {
           totalDeals: dealVerifications.length,
           allVerified: allOk,
-          withIssues: dealVerifications.filter(d => !['ok', 'pending'].includes(d.status)).length,
+          withIssues: dealVerifications.filter(d => !['ok', 'pending', 'ok_with_approved'].includes(d.status)).length,
         },
       }, 200, { cache: 'no-store' });
     }

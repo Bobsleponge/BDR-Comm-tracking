@@ -66,6 +66,7 @@ export async function GET(request: NextRequest) {
       let query = `
         SELECT 
           ce.id,
+          ce.revenue_event_id,
           ce.amount,
           ce.status,
           ce.accrual_date,
@@ -123,7 +124,19 @@ export async function GET(request: NextRequest) {
       query += ' ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month) ASC, br.name ASC, d.client_name ASC';
 
       const rawEntries = db.prepare(query).all(...params) as any[];
-      
+
+      const { buildPaymentSequenceMapLocal, lookupPaymentSequence } = await import(
+        '@/lib/commission/enrich-payment-sequence'
+      );
+      const paymentSeqMap = buildPaymentSequenceMapLocal(
+        db,
+        rawEntries.map((e: { id: string; revenue_event_id?: string; service_id?: string }) => ({
+          commission_entry_id: e.id,
+          revenue_event_id: e.revenue_event_id ?? null,
+          service_id: e.service_id ?? null,
+        }))
+      );
+
       // Map local DB results - use service-level is_renewal when we have a service, else deal-level
       entries = rawEntries.map(entry => {
         const serviceIsRenewal = entry.service_id && (entry.service_is_renewal === 1 || entry.service_is_renewal === true);
@@ -185,6 +198,11 @@ export async function GET(request: NextRequest) {
           payment_stage: entry.payment_stage || '',
           service_name: serviceName,
           billing_type: billingType,
+          payment_sequence: lookupPaymentSequence(
+            paymentSeqMap,
+            entry.revenue_event_id ?? null,
+            entry.id
+          ).label,
         };
       });
     } else {
@@ -308,6 +326,7 @@ export async function GET(request: NextRequest) {
           payment_stage: revenueEvent?.payment_stage || '',
           service_name: serviceName,
           billing_type: billingType,
+          payment_sequence: '1 of 1',
         };
       });
 
@@ -412,6 +431,7 @@ export async function GET(request: NextRequest) {
       'BDR Name',
       'Service Name',
       'Billing Type',
+      'Payment',
       'Payable Date',
       'Amount claimed on',
       'Commission (This Period)',
@@ -451,6 +471,7 @@ export async function GET(request: NextRequest) {
           entry.bdr_name || '',
           entry.service_name || entry.service_type || 'Service',
           entry.billing_type || '',
+          entry.payment_sequence || '1 of 1',
           toDateCell(payableDate),
           billAmount > 0 ? billAmount : null,
           commissionAmount,
@@ -463,11 +484,12 @@ export async function GET(request: NextRequest) {
         ]);
       });
 
-    // Add total row to Service Commission Detail sheet (Commission column is index 6)
+    // Add total row to Service Commission Detail sheet (Commission column is index 7)
     const detailTotal = entries.reduce((sum, e) => sum + Number(e.amount ?? 0), 0);
     detailData.push([]);
     detailData.push([
       'TOTAL',
+      '',
       '',
       '',
       '',
@@ -488,6 +510,7 @@ export async function GET(request: NextRequest) {
       { wch: 20 }, // BDR Name
       { wch: 25 }, // Service Name
       { wch: 14 }, // Billing Type
+      { wch: 10 }, // Payment
       { wch: 12 }, // Payable Date
       { wch: 18 }, // Amount claimed on
       { wch: 22 }, // Commission (This Period)
@@ -499,7 +522,7 @@ export async function GET(request: NextRequest) {
       { wch: 10 }, // Status
     ];
     detailSheet['!cols'] = detailColWidths;
-    applyNumFmt(detailSheet, { currencyCols: [5, 6, 8, 9, 11], dateCols: [4, 10] });
+    applyNumFmt(detailSheet, { currencyCols: [6, 7, 9, 10, 12], dateCols: [5, 11] });
     
     XLSX.utils.book_append_sheet(workbook, detailSheet, 'Service Commission Detail');
 

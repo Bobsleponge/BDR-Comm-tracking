@@ -14,6 +14,7 @@ const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PU
 interface ExportRow {
   client_name: string;
   deal: string;
+  payment_sequence: string;
   payable_date: string;
   amount_claimed_on: string;
   is_renewal: string;
@@ -41,8 +42,8 @@ function applyBatchReportNumFmt(worksheet: XLSX.WorkSheet) {
   const ref = worksheet['!ref'];
   if (!ref) return;
   const range = XLSX.utils.decode_range(ref);
-  const currencyCols = new Set([3, 5, 6, 8, 9, 10]); // D,F,G,I,J,K
-  const dateCols = new Set([2]); // C
+  const currencyCols = new Set([4, 6, 7, 9, 10, 11]); // E,G,H,J,K,L
+  const dateCols = new Set([3]); // D
   for (let r = range.s.r + 1; r <= range.e.r; r++) {
     for (let c = range.s.c; c <= range.e.c; c++) {
       const addr = XLSX.utils.encode_cell({ r, c });
@@ -99,6 +100,14 @@ export async function GET(
         return apiError('Forbidden', 403);
       }
 
+      const { resolveBatchPayableCutoff, evictBatchItemsPastCutoffLocal } = await import(
+        '@/lib/commission/batch-payable-cutoff'
+      );
+      const reportCutoff = resolveBatchPayableCutoff(batch);
+      if (batch.status === 'draft') {
+        evictBatchItemsPastCutoffLocal(db, id, reportCutoff);
+      }
+
       // Use snapshot for approved/paid (immutable)
       let rows: ExportRow[];
       if ((batch.status === 'approved' || batch.status === 'paid') as boolean) {
@@ -113,9 +122,11 @@ export async function GET(
       } else {
         const items = db.prepare(`
         SELECT 
+          cbi.commission_entry_id,
           cbi.override_amount,
           cbi.override_payment_date,
           cbi.override_commission_rate,
+          cbi.override_amount_collected,
           ce.amount as original_amount,
           ce.payable_date,
           ce.accrual_date,
@@ -129,9 +140,11 @@ export async function GET(
           ds.is_renewal as service_is_renewal,
           ds.original_service_value,
           ds.commissionable_value,
+          re.id as revenue_event_id,
           re.billing_type as re_billing_type,
           re.collection_date,
-          re.amount_collected
+          re.amount_collected,
+          ds.id as service_id
         FROM commission_batch_items cbi
         JOIN commission_entries ce ON cbi.commission_entry_id = ce.id
         JOIN deals d ON ce.deal_id = d.id
@@ -139,13 +152,14 @@ export async function GET(
         LEFT JOIN deal_services ds ON (re.service_id = ds.id OR ce.service_id = ds.id)
         WHERE cbi.batch_id = ?
       `).all(id) as any[];
-        const { buildExportRows } = await import('@/lib/commission/export-rows');
-        rows = buildExportRows(items);
+        const { buildExportRows, attachPaymentSequencesToBatchItems } = await import('@/lib/commission/export-rows');
+        rows = buildExportRows(attachPaymentSequencesToBatchItems(db, items));
       }
 
       const headers = [
         'Client',
         'Deal',
+        'Payment',
         'Payable date',
         'Amount claimed on',
         'Is renewal',
@@ -167,12 +181,13 @@ export async function GET(
         for (const month of sortedMonths) {
           const monthRows = rowsByMonth[month];
           const monthTotal = monthRows.reduce((s: number, r: ExportRow) => s + parseFloat(r.final_invoiced_amount || '0'), 0);
-          worksheetData.push([`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`, '', '', '', '', '', '', '', '', '', '']);
+          worksheetData.push([`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`, '', '', '', '', '', '', '', '', '', '', '']);
           rowTypes.push('month');
           for (const r of monthRows) {
             worksheetData.push([
               r.client_name,
               r.deal,
+              r.payment_sequence || '1 of 1',
               toDateCell(r.payable_date),
               toNum(r.amount_claimed_on),
               r.is_renewal,
@@ -188,16 +203,16 @@ export async function GET(
         }
         worksheetData.push([]);
         rowTypes.push('blank');
-        worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission]);
+        worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', '', totalCommission]);
         rowTypes.push('total');
         const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
         applyReportExcelStyles(worksheet, rowTypes);
         applyBatchReportNumFmt(worksheet);
-        worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
+        worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Commission Report');
         const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-        const filename = `commission-report-${batch.run_date}-${id.slice(0, 8)}.xlsx`;
+        const filename = `commission-report-${reportCutoff}-${id.slice(0, 8)}.xlsx`;
         return new Response(excelBuffer, {
           headers: {
             'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -210,12 +225,13 @@ export async function GET(
       for (const month of sortedMonths) {
         const monthRows = rowsByMonth[month];
         const monthTotal = monthRows.reduce((s: number, r: ExportRow) => s + parseFloat(r.final_invoiced_amount || '0'), 0);
-        csvLines.push([escapeCsvForReport(`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`), '', '', '', '', '', '', '', '', '', ''].join(','));
+        csvLines.push([escapeCsvForReport(`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`), '', '', '', '', '', '', '', '', '', '', ''].join(','));
         for (const r of monthRows) {
           csvLines.push(
             [
               escapeCsvForReport(r.client_name),
               escapeCsvForReport(r.deal),
+              escapeCsvForReport(r.payment_sequence || '1 of 1'),
               escapeCsvForReport(r.payable_date),
               r.amount_claimed_on,
               escapeCsvForReport(r.is_renewal),
@@ -230,10 +246,10 @@ export async function GET(
         }
         csvLines.push('');
       }
-      csvLines.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)].join(','));
+      csvLines.push(['TOTAL', '', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)].join(','));
       const csvContent = csvLines.join('\n');
 
-      const filename = `commission-report-${batch.run_date}-${id.slice(0, 8)}.csv`;
+      const filename = `commission-report-${reportCutoff}-${id.slice(0, 8)}.csv`;
 
       return new Response(csvContent, {
         headers: {
@@ -259,6 +275,14 @@ export async function GET(
     const canAccess = await canAccessBdr(batch.bdr_id);
     if (!canAccess) {
       return apiError('Forbidden', 403);
+    }
+
+    const { resolveBatchPayableCutoff, evictBatchItemsPastCutoffSupabase } = await import(
+      '@/lib/commission/batch-payable-cutoff'
+    );
+    const reportCutoff = resolveBatchPayableCutoff(batch);
+    if (batch.status === 'draft') {
+      await evictBatchItemsPastCutoffSupabase(supabase as any, id, reportCutoff);
     }
 
     let rows: ExportRow[];
@@ -300,6 +324,7 @@ export async function GET(
     const headers = [
       'Client',
       'Deal',
+      'Payment',
       'Payable date',
       'Amount claimed on',
       'Is renewal',
@@ -314,6 +339,7 @@ export async function GET(
     interface CsvRow {
       client_name: string;
       deal: string;
+      payment_sequence: string;
       payable_date: string;
       amount_claimed_on: string;
       is_renewal: string;
@@ -335,12 +361,13 @@ export async function GET(
       for (const month of sortedMonths) {
         const monthRows = rowsByMonth[month];
         const monthTotal = monthRows.reduce((s: number, r: ExportRow) => s + parseFloat(r.final_invoiced_amount || '0'), 0);
-        worksheetData.push([`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`, '', '', '', '', '', '', '', '', '', '']);
+        worksheetData.push([`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`, '', '', '', '', '', '', '', '', '', '', '']);
         rowTypes.push('month');
         for (const r of monthRows) {
           worksheetData.push([
             r.client_name,
             r.deal,
+            r.payment_sequence || '1 of 1',
             toDateCell(r.payable_date),
             toNum(r.amount_claimed_on),
             r.is_renewal,
@@ -356,16 +383,16 @@ export async function GET(
       }
       worksheetData.push([]);
       rowTypes.push('blank');
-      worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission]);
+      worksheetData.push(['TOTAL', '', '', '', '', '', '', '', '', '', '', totalCommission]);
       rowTypes.push('total');
       const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
       applyReportExcelStyles(worksheet, rowTypes);
       applyBatchReportNumFmt(worksheet);
-      worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
+      worksheet['!cols'] = [{ wch: 20 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Commission Report');
       const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-      const filename = `commission-report-${batch.run_date}-${id.slice(0, 8)}.xlsx`;
+      const filename = `commission-report-${reportCutoff}-${id.slice(0, 8)}.xlsx`;
       return new Response(excelBuffer, {
         headers: {
           'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -378,12 +405,13 @@ export async function GET(
     for (const month of sortedMonths) {
       const monthRows = rowsByMonth[month];
       const monthTotal = monthRows.reduce((s: number, r: ExportRow) => s + parseFloat(r.final_invoiced_amount || '0'), 0);
-      csvLinesSupabase.push([escapeCsvForReport(`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`), '', '', '', '', '', '', '', '', '', ''].join(','));
+      csvLinesSupabase.push([escapeCsvForReport(`${formatMonthHeading(month)} — $${monthTotal.toFixed(2)}`), '', '', '', '', '', '', '', '', '', '', ''].join(','));
       for (const r of monthRows) {
         csvLinesSupabase.push(
           [
             escapeCsvForReport(r.client_name),
             escapeCsvForReport(r.deal),
+            escapeCsvForReport(r.payment_sequence || '1 of 1'),
             escapeCsvForReport(r.payable_date),
             r.amount_claimed_on,
             escapeCsvForReport(r.is_renewal),
@@ -398,10 +426,10 @@ export async function GET(
       }
       csvLinesSupabase.push('');
     }
-    csvLinesSupabase.push(['TOTAL', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)].join(','));
+    csvLinesSupabase.push(['TOTAL', '', '', '', '', '', '', '', '', '', '', totalCommission.toFixed(2)].join(','));
     const csvContent = csvLinesSupabase.join('\n');
 
-    const filename = `commission-report-${batch.run_date}-${id.slice(0, 8)}.csv`;
+    const filename = `commission-report-${reportCutoff}-${id.slice(0, 8)}.csv`;
 
     return new Response(csvContent, {
       headers: {

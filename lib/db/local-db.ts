@@ -33,11 +33,12 @@ export function getLocalDB(): Database.Database {
 }
 
 function seedDefaultLocalUsers(db: Database.Database) {
+  // Canonical IDs match scripts/docs (e.g. test-bdr-id) so quick-login users see their data.
   db.exec(`
     INSERT OR IGNORE INTO bdr_reps (id, name, email, status, created_at, updated_at)
     VALUES
-      ('default-admin-rep', 'Admin User', 'admin@example.com', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-      ('default-test-rep', 'Test BDR', 'test@example.com', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+      ('admin-user-id', 'Admin User', 'admin@example.com', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+      ('test-bdr-id', 'Test BDR', 'test@example.com', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
   `);
 }
 
@@ -68,6 +69,7 @@ function migrateSchema(db: Database.Database) {
         id TEXT PRIMARY KEY,
         bdr_id TEXT NOT NULL REFERENCES bdr_reps(id) ON DELETE CASCADE,
         run_date TEXT NOT NULL,
+        payable_cutoff TEXT,
         status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'paid')),
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -75,6 +77,11 @@ function migrateSchema(db: Database.Database) {
     `);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_batches_bdr_id ON commission_batches(bdr_id);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_batches_status ON commission_batches(status);`);
+
+    const cbInfo = db.prepare("PRAGMA table_info(commission_batches)").all() as Array<{ name: string }>;
+    if (!cbInfo.map((c) => c.name).includes('payable_cutoff')) {
+      db.exec(`ALTER TABLE commission_batches ADD COLUMN payable_cutoff TEXT`);
+    }
 
     // Add invoiced_batch_id to commission_entries if not exists
     const ceInfo = db.prepare("PRAGMA table_info(commission_entries)").all() as Array<{ name: string }>;
@@ -93,6 +100,7 @@ function migrateSchema(db: Database.Database) {
         override_amount REAL,
         override_payment_date TEXT,
         override_commission_rate REAL,
+        override_amount_collected REAL,
         adjustment_note TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -109,6 +117,9 @@ function migrateSchema(db: Database.Database) {
     }
     if (!cbiColNames.includes('override_commission_rate')) {
       db.exec(`ALTER TABLE commission_batch_items ADD COLUMN override_commission_rate REAL`);
+    }
+    if (!cbiColNames.includes('override_amount_collected')) {
+      db.exec(`ALTER TABLE commission_batch_items ADD COLUMN override_amount_collected REAL`);
     }
 
     // Approved commission fingerprints: survives reprocessing (entries deleted = batch_items cascade deleted)
@@ -223,6 +234,9 @@ function migrateSchema(db: Database.Database) {
     if (!dsInfo.map((c) => c.name).includes('billing_percentage')) {
       db.exec(`ALTER TABLE deal_services ADD COLUMN billing_percentage REAL`);
     }
+    if (!dsInfo.map((c) => c.name).includes('original_billing_percentage')) {
+      db.exec(`ALTER TABLE deal_services ADD COLUMN original_billing_percentage REAL`);
+    }
     const ceInfo = db.prepare("PRAGMA table_info(commission_entries)").all() as Array<{ name: string }>;
     const ceCols = ceInfo.map((c) => c.name);
     if (!ceCols.includes('service_id')) {
@@ -251,7 +265,7 @@ function migrateSchema(db: Database.Database) {
           accrual_date TEXT,
           payable_date TEXT,
           amount REAL,
-          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('accrued', 'pending', 'payable', 'paid', 'cancelled')),
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('accrued', 'pending', 'payable', 'paid', 'cancelled', 'ignored')),
           created_at TEXT DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -259,6 +273,43 @@ function migrateSchema(db: Database.Database) {
       db.exec(`INSERT INTO commission_entries_new SELECT id, deal_id, bdr_id, revenue_event_id, invoiced_batch_id, service_id, month, accrual_date, payable_date, amount, status, created_at, updated_at FROM commission_entries`);
       db.exec(`DROP TABLE commission_entries`);
       db.exec(`ALTER TABLE commission_entries_new RENAME TO commission_entries`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ce_deal_month_null_svc ON commission_entries(deal_id, month) WHERE service_id IS NULL`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ce_deal_month_svc ON commission_entries(deal_id, month, service_id) WHERE service_id IS NOT NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_service_id ON commission_entries(service_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_bdr_id ON commission_entries(bdr_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_deal_id ON commission_entries(deal_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_month ON commission_entries(month)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_status ON commission_entries(status)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_revenue_event_id ON commission_entries(revenue_event_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_invoiced_batch_id ON commission_entries(invoiced_batch_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_accrual_date ON commission_entries(accrual_date)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_payable_date ON commission_entries(payable_date)`);
+      db.pragma('foreign_keys = ON');
+    }
+    // Add 'ignored' commission entry status (BDR-waived specific payment)
+    const ceIgnoredCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='commission_entries'").get() as { sql: string } | undefined;
+    if (ceIgnoredCheck?.sql?.includes("'cancelled')") && !ceIgnoredCheck.sql.includes("'ignored'")) {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE commission_entries_ignored (
+          id TEXT PRIMARY KEY,
+          deal_id TEXT NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+          bdr_id TEXT NOT NULL REFERENCES bdr_reps(id) ON DELETE CASCADE,
+          revenue_event_id TEXT REFERENCES revenue_events(id) ON DELETE SET NULL,
+          invoiced_batch_id TEXT REFERENCES commission_batches(id) ON DELETE SET NULL,
+          service_id TEXT REFERENCES deal_services(id) ON DELETE SET NULL,
+          month TEXT NOT NULL,
+          accrual_date TEXT,
+          payable_date TEXT,
+          amount REAL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('accrued', 'pending', 'payable', 'paid', 'cancelled', 'ignored')),
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      db.exec(`INSERT INTO commission_entries_ignored SELECT * FROM commission_entries`);
+      db.exec(`DROP TABLE commission_entries`);
+      db.exec(`ALTER TABLE commission_entries_ignored RENAME TO commission_entries`);
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ce_deal_month_null_svc ON commission_entries(deal_id, month) WHERE service_id IS NULL`);
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ce_deal_month_svc ON commission_entries(deal_id, month, service_id) WHERE service_id IS NOT NULL`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_commission_entries_service_id ON commission_entries(service_id)`);
@@ -429,6 +480,7 @@ function initializeSchema(db: Database.Database) {
       contract_quarters INTEGER NOT NULL DEFAULT 4,
       commission_rate REAL,
       billing_percentage REAL,
+      original_billing_percentage REAL,
       commissionable_value REAL NOT NULL,
       commission_amount REAL NOT NULL,
       completion_date TEXT,
@@ -445,6 +497,7 @@ function initializeSchema(db: Database.Database) {
       id TEXT PRIMARY KEY,
       bdr_id TEXT NOT NULL REFERENCES bdr_reps(id) ON DELETE CASCADE,
       run_date TEXT NOT NULL,
+      payable_cutoff TEXT,
       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'paid')),
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -464,7 +517,7 @@ function initializeSchema(db: Database.Database) {
       accrual_date TEXT,
       payable_date TEXT,
       amount REAL,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('accrued', 'pending', 'payable', 'paid', 'cancelled')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('accrued', 'pending', 'payable', 'paid', 'cancelled', 'ignored')),
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );

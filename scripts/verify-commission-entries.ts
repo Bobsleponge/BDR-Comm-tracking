@@ -237,14 +237,13 @@ function main() {
 
 function getExpectedEntryCount(service: ServiceRow, deal?: { is_renewal?: number | boolean; original_deal_value?: number | null }): number {
   const bt = (service.billing_type || '').toLowerCase();
-  // Deposit and paid_on_completion use payment structure regardless of renewal
-  if (bt === 'deposit') return service.completion_date ? 2 : 1;
-  if (bt === 'paid_on_completion') return 1;
   const isRenewal =
     service.is_renewal === 1 ||
     service.is_renewal === true ||
     (deal && (deal.is_renewal === 1 || deal.is_renewal === true) && Number(deal.original_deal_value ?? 0) > 0);
-  if (isRenewal) return 1; // Renewal (one_off/mrr/quarterly): one-time uplift only
+  if (isRenewal) return 1;
+  if (bt === 'deposit') return service.completion_date ? 2 : 1;
+  if (bt === 'paid_on_completion') return 1;
   if (bt === 'one_off' || bt === 'renewal') return 1;
   if (bt === 'mrr') return service.contract_months ?? 12;
   if (bt === 'quarterly') return service.contract_quarters ?? 4;

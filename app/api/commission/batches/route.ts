@@ -184,6 +184,18 @@ export async function GET(request: NextRequest) {
  * POST /api/commission/batches
  * Create a draft batch and attach all eligible entries (Generate Report).
  */
+function parsePayableCutoff(body: unknown, fallback: string): string | null {
+  const raw =
+    body && typeof body === 'object' && 'payable_cutoff' in body
+      ? (body as { payable_cutoff?: unknown }).payable_cutoff
+      : undefined;
+  const cutoff = typeof raw === 'string' && raw.trim() ? raw.trim() : fallback;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) {
+    return null;
+  }
+  return cutoff;
+}
+
 export async function POST(request: NextRequest) {
   try {
     await requireAuth();
@@ -195,6 +207,16 @@ export async function POST(request: NextRequest) {
     }
 
     const today = new Date().toISOString().split('T')[0];
+    let body: unknown = null;
+    try {
+      body = await request.json();
+    } catch {
+      // No body — use defaults (payable through today)
+    }
+    const payableCutoff = parsePayableCutoff(body, today);
+    if (!payableCutoff) {
+      return apiError('payable_cutoff must be a valid date (YYYY-MM-DD)', 400);
+    }
 
     if (USE_LOCAL_DB) {
       const { getLocalDB } = await import('@/lib/db/local-db');
@@ -204,38 +226,49 @@ export async function POST(request: NextRequest) {
       // 1) commission_batch_items: exclude entry IDs in approved/paid batches
       // 2) approved_commission_fingerprints: survives reprocessing (batch_items CASCADE when entries deleted)
       // Fingerprint match uses month (yyyy-MM) to handle date format differences (e.g. 2026-02-01 vs 2026-02-15)
-      const eligible = db.prepare(`
-        SELECT ce.id
+      const { buildLocalBillableFilterContext, filterBillableEntries } = await import(
+        '@/lib/commission/filter-billable-entries'
+      );
+      const billableCtx = buildLocalBillableFilterContext(db);
+
+      const candidates = db.prepare(`
+        SELECT ce.id, ce.bdr_id, ce.deal_id, ce.amount, ce.payable_date, ce.accrual_date, ce.month, ce.status
         FROM commission_entries ce
         INNER JOIN deals d ON ce.deal_id = d.id
         WHERE ce.bdr_id = ?
           AND ce.status IN ('payable', 'accrued', 'pending')
-          AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= date('now')
+          AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= ?
           AND (ce.invoiced_batch_id IS NULL OR ce.invoiced_batch_id = '')
           AND NOT EXISTS (
             SELECT 1 FROM commission_batch_items cbi
             JOIN commission_batches cb ON cbi.batch_id = cb.id
             WHERE cbi.commission_entry_id = ce.id AND cb.status IN ('approved', 'paid')
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM approved_commission_fingerprints acf
-            WHERE acf.bdr_id = ce.bdr_id AND acf.deal_id = ce.deal_id
-              AND substr(acf.effective_date, 1, 7) = substr(COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01'), 1, 7)
-          )
           AND d.cancellation_date IS NULL
-      `).all(bdrId) as Array<{ id: string }>;
+      `).all(bdrId, payableCutoff) as Array<{
+        id: string;
+        bdr_id: string;
+        deal_id: string;
+        amount: number;
+        payable_date: string | null;
+        accrual_date: string | null;
+        month: string | null;
+        status: string | null;
+      }>;
+
+      const eligible = filterBillableEntries(candidates, billableCtx).map((e) => ({ id: e.id }));
 
       if (eligible.length === 0) {
-        return apiError('No eligible commission entries to include in report', 400);
+        return apiError(`No eligible commission entries payable on or before ${payableCutoff}`, 400);
       }
 
       const batchId = generateUUID();
 
       const insertBatch = db.prepare(`
-        INSERT INTO commission_batches (id, bdr_id, run_date, status)
-        VALUES (?, ?, ?, 'draft')
+        INSERT INTO commission_batches (id, bdr_id, run_date, payable_cutoff, status)
+        VALUES (?, ?, ?, ?, 'draft')
       `);
-      insertBatch.run(batchId, bdrId, today);
+      insertBatch.run(batchId, bdrId, today, payableCutoff);
 
       const updateEntry = db.prepare(`
         UPDATE commission_entries SET invoiced_batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
@@ -314,7 +347,7 @@ export async function POST(request: NextRequest) {
       .filter((e: any) => {
         if (e.deals?.cancellation_date) return false;
         const effectiveDate = e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
-        return effectiveDate && effectiveDate <= today;
+        return effectiveDate && effectiveDate <= payableCutoff;
       })
       .map((e: any) => e.id);
 
@@ -357,12 +390,12 @@ export async function POST(request: NextRequest) {
       .map((e: any) => e.id);
 
     if (filteredIds.length === 0) {
-      return apiError('No eligible commission entries to include in report', 400);
+      return apiError(`No eligible commission entries payable on or before ${payableCutoff}`, 400);
     }
 
     const { data: batch, error: batchError } = await supabase
       .from('commission_batches')
-      .insert({ bdr_id: bdrId, run_date: today, status: 'draft' })
+      .insert({ bdr_id: bdrId, run_date: today, payable_cutoff: payableCutoff, status: 'draft' })
       .select()
       .single();
 

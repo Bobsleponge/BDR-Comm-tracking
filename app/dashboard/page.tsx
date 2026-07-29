@@ -74,8 +74,16 @@ interface DashboardStats {
     tier1Commission: number;
     tier2Commission: number;
     totalTierCommission: number;
+    tier2ExtraCommission: number;
     remainingToThreshold: number;
     inTier2: boolean;
+    projectedRevenueCollected: number;
+    projectedRevenueInTier1: number;
+    projectedRevenueInTier2: number;
+    projectedTier1Commission: number;
+    projectedTier2Commission: number;
+    projectedTotalTierCommission: number;
+    projectedTier2ExtraCommission: number;
   };
 }
 
@@ -181,7 +189,16 @@ export default function DashboardPage() {
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-6 flex justify-between items-center">
             <h2 className="text-2xl font-bold">Dashboard</h2>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <Link href="/clients">
+                <Button variant="outline">Clients</Button>
+              </Link>
+              <Link href="/deals">
+                <Button variant="outline">Deals</Button>
+              </Link>
+              <Link href="/commission">
+                <Button variant="outline">Commission</Button>
+              </Link>
               <Link href="/commission/preview">
                 <Button variant="outline">Commission Preview</Button>
               </Link>

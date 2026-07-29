@@ -41,6 +41,12 @@ export async function POST(
         JOIN commission_entries ce ON cbi.commission_entry_id = ce.id
         WHERE cbi.batch_id = ?
       `).all(id) as any[];
+      const existingFp = db.prepare(`
+        SELECT deal_id, effective_date, amount FROM approved_commission_fingerprints WHERE batch_id = ?
+      `).all(id) as Array<{ deal_id: string; effective_date: string; amount: number }>;
+      const existingKeys = new Set(
+        existingFp.map((f) => `${f.deal_id}|${Number(f.amount).toFixed(2)}|${String(f.effective_date).slice(0, 10)}`)
+      );
       const insertFp = db.prepare(`
         INSERT INTO approved_commission_fingerprints (id, bdr_id, deal_id, effective_date, amount, batch_id)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -49,9 +55,15 @@ export async function POST(
         const effectiveDate = i.payable_date || i.accrual_date || (i.month ? `${i.month}-01` : null);
         const amount = i.override_amount ?? i.amount;
         if (effectiveDate != null && amount != null) {
+          const key = `${i.deal_id}|${Number(amount).toFixed(2)}|${String(effectiveDate).slice(0, 10)}`;
+          if (existingKeys.has(key)) continue;
+          existingKeys.add(key);
           insertFp.run(generateUUID(), i.bdr_id, i.deal_id, effectiveDate, amount, id);
         }
       }
+
+      const { invalidateApprovalLockCache } = await import('@/lib/commission/approval-lock-store');
+      invalidateApprovalLockCache();
 
       // Snapshot report rows for immutability (survives reprocessing CASCADE); includes UI-only adjustment metadata (not exported to Excel)
       const snapshotItems = db.prepare(`
@@ -62,6 +74,7 @@ export async function POST(
           cbi.override_amount,
           cbi.override_payment_date,
           cbi.override_commission_rate,
+          cbi.override_amount_collected,
           ce.amount as original_amount,
           ce.payable_date,
           ce.accrual_date,
@@ -75,9 +88,11 @@ export async function POST(
           ds.is_renewal as service_is_renewal,
           ds.original_service_value,
           ds.commissionable_value,
+          re.id as revenue_event_id,
           re.billing_type as re_billing_type,
           re.collection_date,
-          re.amount_collected
+          re.amount_collected,
+          ds.id as service_id
         FROM commission_batch_items cbi
         JOIN commission_entries ce ON cbi.commission_entry_id = ce.id
         JOIN deals d ON ce.deal_id = d.id
@@ -86,8 +101,12 @@ export async function POST(
         WHERE cbi.batch_id = ?
         ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01'), cbi.commission_entry_id
       `).all(id) as any[];
-      const { buildCommissionSnapshotRows } = await import('@/lib/commission/export-rows');
-      const snapshotRows = buildCommissionSnapshotRows(snapshotItems);
+      const { buildCommissionSnapshotRows, attachPaymentSequencesToBatchItems } = await import(
+        '@/lib/commission/export-rows'
+      );
+      const snapshotRows = buildCommissionSnapshotRows(
+        attachPaymentSequencesToBatchItems(db, snapshotItems) as import('@/lib/commission/export-rows').SnapshotItemInput[]
+      );
       db.prepare(`
         INSERT INTO commission_batch_snapshots (id, batch_id, snapshot_data)
         VALUES (?, ?, ?)
@@ -154,6 +173,7 @@ export async function POST(
         override_amount,
         override_payment_date,
         override_commission_rate,
+        override_amount_collected,
         commission_entries(
           amount,
           payable_date,

@@ -2,6 +2,7 @@
 
 import { format, addDays } from 'date-fns';
 import type { Database } from '@/types/database';
+import { getRenewalUpliftAmount } from '@/lib/commission/calculator';
 
 type DealService = Database['public']['Tables']['deal_services']['Row'];
 
@@ -161,20 +162,12 @@ export function CommissionBreakdown({
                           </span>
                         </div>
                         {(service as any).original_service_value != null && (
-                          <>
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Previous Deal Amount:</span>
-                              <span className="text-gray-900">
-                                {formatCurrency((service as any).original_service_value)}
-                              </span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Uplift (commissionable):</span>
-                              <span className="text-gray-900 font-medium">
-                                {formatCurrency(Math.max(0, service.commissionable_value - ((service as any).original_service_value || 0)))}
-                              </span>
-                            </div>
-                          </>
+                          <div className="flex justify-between">
+                            <span className="text-gray-500">ARR Uplift:</span>
+                            <span className="text-gray-900 font-medium">
+                              {formatCurrency(getRenewalUpliftAmount(service as any))}
+                            </span>
+                          </div>
                         )}
                       </>
                     ) : (

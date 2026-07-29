@@ -1,8 +1,11 @@
 import 'server-only';
 
 import { createClient } from '@/lib/supabase/server';
+import { shouldSkipCommissionCreation, type DealApprovalLocks } from '@/lib/commission/approval-lock';
+import { getEntryEffectiveMonth } from '@/lib/commission/entry-month';
 import { generateUUID } from '@/lib/utils/uuid';
 import { parseISO, addDays, addMonths, startOfMonth, format } from 'date-fns';
+import { getCommissionableOriginalServiceValue, getRenewalUpliftAmount } from '@/lib/commission/calculator';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -66,10 +69,32 @@ export async function createRevenueEvent(
   return result.data.id;
 }
 
+export interface ProcessRevenueEventOptions {
+  /** yyyy-MM months to skip (approved/fingerprinted periods) */
+  skipMonths?: Set<string>;
+  /** Amount quotas from approval fingerprints (survives payable date shifts) */
+  dealLocks?: DealApprovalLocks;
+  /** Create CE for orphan revenue events even when deal-level lock would block (post-reprocess repair) */
+  bypassApprovalLock?: boolean;
+  existingEntries?: Array<{
+    id?: string;
+    bdr_id: string;
+    deal_id: string;
+    amount: number;
+    payable_date?: string | null;
+    accrual_date?: string | null;
+    month?: string | null;
+    status?: string | null;
+  }>;
+}
+
 /**
  * Process a revenue event to create commission entry
  */
-export async function processRevenueEvent(eventId: string): Promise<string | null> {
+export async function processRevenueEvent(
+  eventId: string,
+  options?: ProcessRevenueEventOptions
+): Promise<string | null> {
   if (USE_LOCAL_DB) {
     const { getLocalDB } = await import('@/lib/db/local-db');
     const db = getLocalDB();
@@ -192,6 +217,21 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
         const accrualDateObj = parseISO(accrualDate);
         payableDate = format(addDays(accrualDateObj, payoutDelayDays), 'yyyy-MM-dd');
       }
+    }
+
+    if (
+      !options?.bypassApprovalLock &&
+      options?.dealLocks &&
+      shouldSkipCommissionCreation(
+        event.deal_id,
+        commissionAmount,
+        payableDate,
+        accrualDate,
+        options.dealLocks,
+        options.existingEntries ?? []
+      )
+    ) {
+      return null;
     }
 
     // Create commission entry (include service_id for UNIQUE constraint: deal_id+month+service_id)
@@ -356,6 +396,21 @@ export async function processRevenueEvent(eventId: string): Promise<string | nul
     }
   }
 
+  if (
+    !options?.bypassApprovalLock &&
+    options?.dealLocks &&
+    shouldSkipCommissionCreation(
+      event.deal_id,
+      commissionAmount,
+      payableDate,
+      accrualDate,
+      options.dealLocks,
+      options.existingEntries ?? []
+    )
+  ) {
+    return null;
+  }
+
   const entryResult = await supabase
     .from('commission_entries')
     .insert({
@@ -453,7 +508,7 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
       const isRenewalService = serviceMarkedRenewal;
       let originalServiceValue: number;
       if (isRenewalService && (service.original_service_value != null && service.original_service_value > 0)) {
-        originalServiceValue = Number(service.original_service_value);
+        originalServiceValue = getCommissionableOriginalServiceValue(service);
       } else if (isRenewalService && isRenewalDeal && dealOriginalValue > 0) {
         if (services.length === 1) {
           originalServiceValue = dealOriginalValue;
@@ -462,15 +517,25 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
           originalServiceValue = dealOriginalValue * proportion;
         }
-      } else if (isRenewalService) {
+      } else if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
         continue; // Service marked renewal but no original value - skip to avoid commission on full amount
+      } else if (isRenewalService && service.billing_type === 'percentage_of_net_sales') {
+        const prev = Number(service.original_billing_percentage ?? 0);
+        const curr = Number(service.billing_percentage ?? 0);
+        if (curr <= prev) continue;
       } else {
         originalServiceValue = 0; // Not a renewal - will use standard billing logic
       }
-      if (isRenewalService) {
-        const renewalServiceValue = Number(service.commissionable_value || 0);
-        const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
-        
+      if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
+        const serviceUplift = getRenewalUpliftAmount({
+          billing_type: service.billing_type,
+          monthly_price: service.monthly_price,
+          quarterly_price: service.quarterly_price,
+          commissionable_value: service.commissionable_value,
+          original_service_value: service.original_service_value ?? originalServiceValue,
+          quantity: service.quantity,
+        });
+
         if (serviceUplift > 0) {
           serviceAmount = serviceUplift;
           serviceBillingType = 'renewal';
@@ -687,7 +752,7 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
       const isRenewalService = serviceMarkedRenewal;
       let originalServiceValue: number;
       if (isRenewalService && (service.original_service_value != null && service.original_service_value > 0)) {
-        originalServiceValue = Number(service.original_service_value);
+        originalServiceValue = getCommissionableOriginalServiceValue(service);
       } else if (isRenewalService && isRenewalDeal && dealOriginalValue > 0) {
         if (servicesResult.data!.length === 1) {
           originalServiceValue = dealOriginalValue;
@@ -696,15 +761,25 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
           const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
           originalServiceValue = dealOriginalValue * proportion;
         }
-      } else if (isRenewalService) {
+      } else if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
         continue;
+      } else if (isRenewalService && service.billing_type === 'percentage_of_net_sales') {
+        const prev = Number(service.original_billing_percentage ?? 0);
+        const curr = Number(service.billing_percentage ?? 0);
+        if (curr <= prev) continue;
       } else {
         originalServiceValue = 0; // Not a renewal - will use standard billing logic
       }
-      if (isRenewalService) {
-        const renewalServiceValue = Number(service.commissionable_value || 0);
-        const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
-        
+      if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
+        const serviceUplift = getRenewalUpliftAmount({
+          billing_type: service.billing_type,
+          monthly_price: service.monthly_price,
+          quarterly_price: service.quarterly_price,
+          commissionable_value: service.commissionable_value,
+          original_service_value: service.original_service_value ?? originalServiceValue,
+          quantity: service.quantity,
+        });
+
         if (serviceUplift > 0) {
           serviceAmount = serviceUplift;
           serviceBillingType = 'renewal';

@@ -39,8 +39,12 @@ interface DealVerification {
   expectedTotal: number;
   accruedTotal: number;
   pendingTotal: number;
+  approvedTotal?: number;
+  outstandingExpected?: number;
+  outstandingAccrued?: number;
+  approvedMonths?: string[];
   services: ServiceVerification[];
-  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count';
+  status: 'ok' | 'pending' | 'mismatch' | 'missing_entries' | 'wrong_count' | 'ok_with_approved';
   message: string;
   hasOverride?: boolean;
 }
@@ -80,7 +84,7 @@ export function CommissionVerification() {
   if (!data) return null;
 
   const getStatusIcon = (status: string) => {
-    if (status === 'ok') return <CheckCircle className="h-4 w-4 text-green-500" />;
+    if (status === 'ok' || status === 'ok_with_approved') return <CheckCircle className="h-4 w-4 text-green-500" />;
     if (status === 'pending') return <Clock className="h-4 w-4 text-amber-500" />;
     return <AlertTriangle className="h-4 w-4 text-destructive" />;
   };
@@ -88,12 +92,14 @@ export function CommissionVerification() {
   const getStatusBadge = (status: string) => {
     const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
       ok: 'default',
+      ok_with_approved: 'default',
       pending: 'secondary',
       mismatch: 'destructive',
       missing_entries: 'destructive',
       wrong_count: 'destructive',
     };
-    return <Badge variant={variants[status] || 'outline'}>{status.replace(/_/g, ' ')}</Badge>;
+    const label = status === 'ok_with_approved' ? 'ok (approved locked)' : status.replace(/_/g, ' ');
+    return <Badge variant={variants[status] || 'outline'}>{label}</Badge>;
   };
 
   return (
@@ -102,7 +108,7 @@ export function CommissionVerification() {
         <CardHeader>
           <CardTitle>Commission Verification</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Verifies commission amounts and entry counts per service. Deposit: 2; One-off: 1; Paid on Completion: 1; MRR: 12; Quarterly: 4; Renewal: 1 (uplift, due 7 days after close).
+            Verifies commission amounts and entry counts per service. Approved months are locked and excluded from outstanding checks. Deposit: 2; One-off: 1; Paid on Completion: 1; MRR: 12; Quarterly: 4; Renewal: 1.
           </p>
         </CardHeader>
         <CardContent>
@@ -144,9 +150,25 @@ export function CommissionVerification() {
                       {getStatusBadge(deal.status)}
                     </div>
                   </div>
-                  <div className="text-sm text-muted-foreground mt-2">
-                    Expected ${deal.expectedTotal.toFixed(2)} | Accrued ${deal.accruedTotal.toFixed(2)}
-                    {deal.pendingTotal > 0 && ` | Pending $${deal.pendingTotal.toFixed(2)} (future)`}
+                  <div className="text-sm text-muted-foreground mt-2 space-y-1">
+                    <div>
+                      Expected ${deal.expectedTotal.toFixed(2)} | Accrued ${deal.accruedTotal.toFixed(2)}
+                      {deal.pendingTotal > 0 && ` | Pending $${deal.pendingTotal.toFixed(2)} (future)`}
+                    </div>
+                    {(deal.approvedTotal ?? 0) > 0 && (
+                      <div>
+                        Approved (locked) ${(deal.approvedTotal ?? 0).toFixed(2)}
+                        {' · '}
+                        Outstanding expected ${(deal.outstandingExpected ?? 0).toFixed(2)}
+                        {' · '}
+                        Outstanding accrued ${(deal.outstandingAccrued ?? 0).toFixed(2)}
+                        {deal.approvedMonths && deal.approvedMonths.length > 0 && (
+                          <span className="block text-xs">
+                            Locked months: {deal.approvedMonths.join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </CardHeader>
                 <CardContent className="pt-0">

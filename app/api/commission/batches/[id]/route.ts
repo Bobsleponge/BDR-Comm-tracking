@@ -37,6 +37,13 @@ export async function GET(
         return apiError('Forbidden', 403);
       }
 
+      if (batch.status === 'draft') {
+        const { evictBatchItemsPastCutoffLocal, resolveBatchPayableCutoff } = await import(
+          '@/lib/commission/batch-payable-cutoff'
+        );
+        evictBatchItemsPastCutoffLocal(db, id, resolveBatchPayableCutoff(batch));
+      }
+
       // Use snapshot for approved/paid (immutable; survives reprocessing CASCADE)
       if ((batch.status === 'approved' || batch.status === 'paid') as boolean) {
         const snapshot = db.prepare('SELECT snapshot_data FROM commission_batch_snapshots WHERE batch_id = ?').get(id) as { snapshot_data: string } | undefined;
@@ -54,7 +61,11 @@ export async function GET(
         }
       }
 
-      const { computeSnapshotAdjustmentFields } = await import('@/lib/commission/export-rows');
+      const { computeSnapshotAdjustmentFields, effectiveAmountCollected } = await import('@/lib/commission/export-rows');
+
+      const { buildPaymentSequenceMapLocal, lookupPaymentSequence } = await import(
+        '@/lib/commission/enrich-payment-sequence'
+      );
 
       const items = db.prepare(`
         SELECT 
@@ -63,6 +74,7 @@ export async function GET(
           cbi.override_amount,
           cbi.override_payment_date,
           cbi.override_commission_rate,
+          cbi.override_amount_collected,
           cbi.adjustment_note,
           cbi.updated_at as cbi_updated_at,
           ce.amount,
@@ -94,16 +106,26 @@ export async function GET(
         WHERE cbi.batch_id = ?
       `).all(id) as any[];
 
+      const paymentSeqMap = buildPaymentSequenceMapLocal(
+        db,
+        items.map((i: { commission_entry_id: string; revenue_event_id?: string; service_id?: string }) => ({
+          commission_entry_id: i.commission_entry_id,
+          revenue_event_id: i.revenue_event_id ?? null,
+          service_id: i.service_id ?? null,
+        }))
+      );
+
       return apiSuccess({
         ...batch,
         items: items.map((i) => {
+          const effectiveCollected = effectiveAmountCollected(i.override_amount_collected, i.amount_collected);
           const isRenewal = !!(i.service_is_renewal === 1 || i.service_is_renewal === true || i.deal_is_renewal === 1 || i.deal_is_renewal === true || i.revenue_billing_type === 'renewal');
           let previous_deal_amount: number | null = null;
           let new_deal_amount: number | null = null;
           if (isRenewal) {
             const storedNew = i.commissionable_value ?? i.deal_value ?? 0;
             const storedPrev = i.original_service_value ?? i.original_deal_value;
-            const uplift = Number(i.amount_collected ?? 0);
+            const uplift = Number(effectiveCollected ?? 0);
             if (i.revenue_billing_type === 'renewal' && uplift > 0 && storedNew > 0) {
               const numNew = Number(storedNew);
               if (storedPrev == null || Number(storedPrev) === numNew) {
@@ -125,6 +147,8 @@ export async function GET(
             override_amount: i.override_amount,
             override_payment_date: i.override_payment_date,
             override_commission_rate: i.override_commission_rate,
+            override_amount_collected: i.override_amount_collected,
+            baseline_amount_collected: i.amount_collected,
             original_amount: i.amount,
             payable_date: i.payable_date,
             accrual_date: i.accrual_date,
@@ -140,7 +164,7 @@ export async function GET(
             commissionable_value: i.commissionable_value,
             re_billing_type: i.revenue_billing_type,
             collection_date: i.collection_date,
-            amount_collected: i.amount_collected,
+            amount_collected: effectiveCollected,
             commission_entry_id: i.commission_entry_id,
             adjustment_note: i.adjustment_note,
             batch_item_updated_at: i.cbi_updated_at ?? null,
@@ -152,6 +176,7 @@ export async function GET(
             override_amount: i.override_amount,
             override_payment_date: i.override_payment_date,
             override_commission_rate: i.override_commission_rate,
+            override_amount_collected: i.override_amount_collected ?? null,
             adjustment_note: i.adjustment_note,
             amount: i.amount,
             client_name: i.client_name,
@@ -160,7 +185,7 @@ export async function GET(
             commission_rate: i.commission_rate,
             billing_type: i.billing_type,
             collection_date: i.collection_date,
-            amount_collected: i.amount_collected,
+            amount_collected: effectiveCollected,
             commissionable_value: i.commissionable_value ?? null,
             is_renewal: isRenewal,
             previous_deal_amount: isRenewal ? previous_deal_amount : null,
@@ -169,6 +194,11 @@ export async function GET(
             accrual_date: i.accrual_date,
             month: i.month,
             deal_id: i.deal_id,
+            payment_sequence: lookupPaymentSequence(
+              paymentSeqMap,
+              i.revenue_event_id ?? null,
+              i.commission_entry_id
+            ).label,
             change_summary,
             adjusted_at: i.cbi_updated_at ?? null,
             is_adjusted,
@@ -198,6 +228,13 @@ export async function GET(
       return apiError('Forbidden', 403);
     }
 
+    if (batch.status === 'draft') {
+      const { evictBatchItemsPastCutoffSupabase, resolveBatchPayableCutoff } = await import(
+        '@/lib/commission/batch-payable-cutoff'
+      );
+      await evictBatchItemsPastCutoffSupabase(supabase as any, id, resolveBatchPayableCutoff(batch));
+    }
+
     // Use snapshot for approved/paid (immutable)
     if (batch.status === 'approved' || batch.status === 'paid') {
       const { data: snapshot } = await supabase
@@ -218,7 +255,7 @@ export async function GET(
       }
     }
 
-    const { computeSnapshotAdjustmentFields } = await import('@/lib/commission/export-rows');
+    const { computeSnapshotAdjustmentFields, effectiveAmountCollected } = await import('@/lib/commission/export-rows');
 
     const { data: batchItems } = await supabase
       .from('commission_batch_items')
@@ -229,6 +266,7 @@ export async function GET(
         override_amount,
         override_payment_date,
         override_commission_rate,
+        override_amount_collected,
         adjustment_note,
         commission_entries(
           amount,
@@ -251,6 +289,7 @@ export async function GET(
       const dsObj = Array.isArray(dealService) ? dealService[0] : dealService;
       const deal = ceObj?.deals;
       const dealObj = Array.isArray(deal) ? deal[0] : deal;
+      const effectiveCollected = effectiveAmountCollected(item.override_amount_collected, reObj?.amount_collected);
       const isRenewal = !!(dsObj?.is_renewal || dealObj?.is_renewal || reObj?.billing_type === 'renewal');
 
       let previous_deal_amount: number | null = null;
@@ -258,7 +297,7 @@ export async function GET(
       if (isRenewal) {
         const storedNew = dsObj?.commissionable_value ?? dealObj?.deal_value ?? 0;
         const storedPrev = dsObj?.original_service_value ?? dealObj?.original_deal_value;
-        const uplift = Number(reObj?.amount_collected ?? 0);
+        const uplift = Number(effectiveCollected ?? 0);
         if (reObj?.billing_type === 'renewal' && uplift > 0 && storedNew > 0) {
           const numNew = Number(storedNew);
           if (storedPrev == null || Number(storedPrev) === numNew) {
@@ -281,6 +320,8 @@ export async function GET(
         override_amount: item.override_amount,
         override_payment_date: item.override_payment_date,
         override_commission_rate: item.override_commission_rate,
+        override_amount_collected: item.override_amount_collected,
+        baseline_amount_collected: reObj?.amount_collected,
         original_amount: ceObj?.amount,
         payable_date: ceObj?.payable_date,
         accrual_date: ceObj?.accrual_date,
@@ -296,7 +337,7 @@ export async function GET(
         commissionable_value: dsObj?.commissionable_value,
         re_billing_type: reObj?.billing_type,
         collection_date: reObj?.collection_date,
-        amount_collected: reObj?.amount_collected,
+        amount_collected: effectiveCollected,
         commission_entry_id: item.commission_entry_id,
         adjustment_note: item.adjustment_note,
         batch_item_updated_at: item.updated_at ?? null,
@@ -309,6 +350,7 @@ export async function GET(
         override_amount: item.override_amount,
         override_payment_date: item.override_payment_date,
         override_commission_rate: item.override_commission_rate,
+        override_amount_collected: item.override_amount_collected ?? null,
         adjustment_note: item.adjustment_note,
         amount: ceObj?.amount ?? 0,
         client_name: dealObj?.client_name ?? '',
@@ -317,7 +359,7 @@ export async function GET(
         commission_rate: dsObj?.commission_rate ?? null,
         billing_type: dsObj?.billing_type ?? '',
         collection_date: reObj?.collection_date ?? '',
-        amount_collected: reObj?.amount_collected ?? 0,
+        amount_collected: effectiveCollected,
         commissionable_value: dsObj?.commissionable_value ?? dealObj?.deal_value ?? null,
         is_renewal: isRenewal,
         previous_deal_amount: isRenewal ? previous_deal_amount : null,
@@ -348,7 +390,7 @@ export async function GET(
 
 /**
  * PATCH /api/commission/batches/[id]
- * Draft edits: remove_entry, adjust_amount, add_note. Only when status = 'draft'.
+ * Draft edits: remove_entry, ignore_entry, adjust_amount, add_note. Only when status = 'draft'.
  */
 export async function PATCH(
   request: NextRequest,
@@ -359,7 +401,7 @@ export async function PATCH(
     const { id } = await params;
 
     const body = await request.json().catch(() => ({}));
-    const { action, commission_entry_id, override_amount, adjustment_note, override_payment_date, override_commission_rate, previous_deal_amount } = body;
+    const { action, commission_entry_id, override_amount, adjustment_note, override_payment_date, override_commission_rate, override_amount_collected, previous_deal_amount } = body;
 
     if (!action) {
       return apiError('action required', 400);
@@ -387,28 +429,40 @@ export async function PATCH(
 
       // Add missing eligible entries: due for payment, not in any batch, not in approved/paid report
       if (action === 'add_missing_entries') {
-        const today = new Date().toISOString().split('T')[0];
+        const { resolveBatchPayableCutoff } = await import('@/lib/commission/batch-payable-cutoff');
+        const payableCutoff = resolveBatchPayableCutoff(batch);
         // Match fingerprints by (deal_id, month) - excludes already paid regardless of amount/date format
-        const missing = db.prepare(`
-          SELECT ce.id
+        const { buildLocalBillableFilterContext, filterBillableEntries } = await import(
+          '@/lib/commission/filter-billable-entries'
+        );
+        const billableCtx = buildLocalBillableFilterContext(db);
+
+        const candidates = db.prepare(`
+          SELECT ce.id, ce.bdr_id, ce.deal_id, ce.amount, ce.payable_date, ce.accrual_date, ce.month, ce.status
           FROM commission_entries ce
           INNER JOIN deals d ON ce.deal_id = d.id
           WHERE ce.bdr_id = ?
             AND ce.status IN ('payable', 'accrued', 'pending')
-            AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= date('now')
+            AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= ?
             AND (ce.invoiced_batch_id IS NULL OR ce.invoiced_batch_id = '')
             AND NOT EXISTS (
               SELECT 1 FROM commission_batch_items cbi
               JOIN commission_batches cb ON cbi.batch_id = cb.id
               WHERE cbi.commission_entry_id = ce.id AND cb.status IN ('approved', 'paid')
             )
-            AND NOT EXISTS (
-              SELECT 1 FROM approved_commission_fingerprints acf
-              WHERE acf.bdr_id = ce.bdr_id AND acf.deal_id = ce.deal_id
-                AND substr(acf.effective_date, 1, 7) = substr(COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01'), 1, 7)
-            )
             AND d.cancellation_date IS NULL
-        `).all(batch.bdr_id) as Array<{ id: string }>;
+        `).all(batch.bdr_id, payableCutoff) as Array<{
+          id: string;
+          bdr_id: string;
+          deal_id: string;
+          amount: number;
+          payable_date: string | null;
+          accrual_date: string | null;
+          month: string | null;
+          status: string | null;
+        }>;
+
+        const missing = filterBillableEntries(candidates, billableCtx).map((e) => ({ id: e.id }));
 
         if (missing.length === 0) {
           return apiSuccess({ success: true, added_count: 0, message: 'No additional eligible entries found' });
@@ -442,6 +496,18 @@ export async function PATCH(
         db.prepare('UPDATE commission_entries SET invoiced_batch_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(commission_entry_id);
         db.prepare('DELETE FROM commission_batch_items WHERE batch_id = ? AND commission_entry_id = ?').run(id, commission_entry_id);
         return apiSuccess({ success: true, removed: commission_entry_id });
+      }
+
+      if (action === 'ignore_entry') {
+        db.prepare(`
+          UPDATE commission_entries
+          SET status = 'ignored', invoiced_batch_id = NULL, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(commission_entry_id);
+        const { syncIgnoredEntrySideEffects } = await import('@/lib/commission/entry-source-sync');
+        syncIgnoredEntrySideEffects(db, commission_entry_id);
+        db.prepare('DELETE FROM commission_batch_items WHERE batch_id = ? AND commission_entry_id = ?').run(id, commission_entry_id);
+        return apiSuccess({ success: true, ignored: commission_entry_id });
       }
 
       if (action === 'adjust_amount') {
@@ -481,16 +547,23 @@ export async function PATCH(
           db.prepare("UPDATE commission_entries SET payable_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(override_payment_date, commission_entry_id);
         }
 
-        const today = new Date().toISOString().split('T')[0];
+        const { resolveBatchPayableCutoff, effectivePayableDate } = await import(
+          '@/lib/commission/batch-payable-cutoff'
+        );
+        const payableCutoff = resolveBatchPayableCutoff(batch);
         let effectiveDate = override_payment_date;
         if (!effectiveDate) {
           const ce = db.prepare('SELECT payable_date, accrual_date, month FROM commission_entries WHERE id = ?').get(commission_entry_id) as any;
-          effectiveDate = ce?.payable_date ?? ce?.accrual_date ?? (ce?.month ? `${String(ce.month)}-01` : null);
+          effectiveDate = effectivePayableDate(null, ce?.payable_date, ce?.accrual_date, ce?.month);
         }
-        if (effectiveDate && effectiveDate > today) {
+        if (effectiveDate && effectiveDate > payableCutoff) {
           db.prepare('UPDATE commission_entries SET invoiced_batch_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(commission_entry_id);
           db.prepare('DELETE FROM commission_batch_items WHERE batch_id = ? AND commission_entry_id = ?').run(id, commission_entry_id);
-          return apiSuccess({ success: true, removed: commission_entry_id });
+          return apiSuccess({
+            success: true,
+            removed: commission_entry_id,
+            message: `Moved to a future report — payable date is after ${payableCutoff}`,
+          });
         }
         return apiSuccess({ success: true });
       }
@@ -514,6 +587,26 @@ export async function PATCH(
         const serviceId = ceRow?.service_id || ceRow?.re_service_id;
         if (serviceId && override_commission_rate != null) {
           db.prepare('UPDATE deal_services SET commission_rate = ?, updated_at = datetime(\'now\') WHERE id = ?').run(override_commission_rate, serviceId);
+        }
+        return apiSuccess({ success: true });
+      }
+
+      if (action === 'update_amount_claimed') {
+        if (typeof override_amount_collected !== 'number' && override_amount_collected !== null) {
+          return apiError('override_amount_collected must be a number or null', 400);
+        }
+        if (override_amount_collected != null && override_amount_collected < 0) {
+          return apiError('override_amount_collected must be non-negative', 400);
+        }
+        db.prepare(`
+          UPDATE commission_batch_items
+          SET override_amount_collected = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE batch_id = ? AND commission_entry_id = ?
+        `).run(override_amount_collected, id, commission_entry_id);
+
+        if (override_amount_collected != null) {
+          const { syncAmountClaimedToSourceTables } = await import('@/lib/commission/entry-source-sync');
+          syncAmountClaimedToSourceTables(db, id, commission_entry_id, override_amount_collected);
         }
         return apiSuccess({ success: true });
       }
@@ -581,7 +674,8 @@ export async function PATCH(
     }
 
     if (action === 'add_missing_entries') {
-      const today = new Date().toISOString().split('T')[0];
+      const { resolveBatchPayableCutoff } = await import('@/lib/commission/batch-payable-cutoff');
+      const payableCutoff = resolveBatchPayableCutoff(batch);
       const { data: entriesWithDates } = await supabase
         .from('commission_entries')
         .select('id, payable_date, accrual_date, month, deal_id, deals!inner(cancellation_date)')
@@ -594,7 +688,7 @@ export async function PATCH(
         .filter((e: any) => {
           if (e.deals?.cancellation_date) return false;
           const effectiveDate = e.payable_date || e.accrual_date || (e.month ? `${e.month}-01` : null);
-          return effectiveDate && effectiveDate <= today;
+          return effectiveDate && effectiveDate <= payableCutoff;
         })
         .map((e: any) => e.id);
 
@@ -610,7 +704,7 @@ export async function PATCH(
           .select('commission_entry_id')
           .in('batch_id', approvedBatchIds);
         const alreadyApprovedIds = new Set((items || []).map((i: any) => i.commission_entry_id));
-        filteredIds = filteredIds.filter((id: string) => !alreadyApprovedIds.has(id));
+        filteredIds = filteredIds.filter((entryId: string) => !alreadyApprovedIds.has(entryId));
       }
 
       // Exclude by approved_commission_fingerprints (survives reprocessing)
@@ -668,6 +762,21 @@ export async function PATCH(
       return apiSuccess({ success: true, removed: commission_entry_id });
     }
 
+    if (action === 'ignore_entry') {
+      await supabase
+        .from('commission_entries')
+        .update({ status: 'ignored', invoiced_batch_id: null })
+        .eq('id', commission_entry_id);
+
+      await supabase
+        .from('commission_batch_items')
+        .delete()
+        .eq('batch_id', id)
+        .eq('commission_entry_id', commission_entry_id);
+
+      return apiSuccess({ success: true, ignored: commission_entry_id });
+    }
+
     if (action === 'adjust_amount') {
       if (typeof override_amount !== 'number' && override_amount !== null) {
         return apiError('override_amount must be a number or null', 400);
@@ -710,7 +819,10 @@ export async function PATCH(
         await supabase.from('commission_entries').update({ payable_date: override_payment_date }).eq('id', commission_entry_id);
       }
 
-      const today = new Date().toISOString().split('T')[0];
+      const { resolveBatchPayableCutoff, effectivePayableDate } = await import(
+        '@/lib/commission/batch-payable-cutoff'
+      );
+      const payableCutoff = resolveBatchPayableCutoff(batch);
       let effectiveDate = override_payment_date;
       if (!effectiveDate) {
         const { data: ce } = await supabase
@@ -718,9 +830,9 @@ export async function PATCH(
           .select('payable_date, accrual_date, month')
           .eq('id', commission_entry_id)
           .single();
-        effectiveDate = ce?.payable_date ?? ce?.accrual_date ?? (ce?.month ? `${ce.month}-01` : null);
+        effectiveDate = effectivePayableDate(null, ce?.payable_date, ce?.accrual_date, ce?.month);
       }
-      if (effectiveDate && effectiveDate > today) {
+      if (effectiveDate && effectiveDate > payableCutoff) {
         await supabase
           .from('commission_entries')
           .update({ invoiced_batch_id: null })
@@ -730,7 +842,11 @@ export async function PATCH(
           .delete()
           .eq('batch_id', id)
           .eq('commission_entry_id', commission_entry_id);
-        return apiSuccess({ success: true, removed: commission_entry_id });
+        return apiSuccess({
+          success: true,
+          removed: commission_entry_id,
+          message: `Moved to a future report — payable date is after ${payableCutoff}`,
+        });
       }
       return apiSuccess({ success: true });
     }
@@ -755,6 +871,63 @@ export async function PATCH(
       const serviceId = (ce as any)?.service_id || (ce as any)?.revenue_events?.service_id;
       if (serviceId && override_commission_rate != null) {
         await supabase.from('deal_services').update({ commission_rate: override_commission_rate }).eq('id', serviceId);
+      }
+      return apiSuccess({ success: true });
+    }
+
+    if (action === 'update_amount_claimed') {
+      if (typeof override_amount_collected !== 'number' && override_amount_collected !== null) {
+        return apiError('override_amount_collected must be a number or null', 400);
+      }
+      if (override_amount_collected != null && override_amount_collected < 0) {
+        return apiError('override_amount_collected must be non-negative', 400);
+      }
+      const { error } = await supabase
+        .from('commission_batch_items')
+        .update({ override_amount_collected: override_amount_collected })
+        .eq('batch_id', id)
+        .eq('commission_entry_id', commission_entry_id);
+      if (error) return apiError(error.message, 500);
+
+      if (override_amount_collected != null) {
+        const { data: ce } = await supabase
+          .from('commission_entries')
+          .select('revenue_event_id, service_id, commission_batch_items!inner(override_amount)')
+          .eq('id', commission_entry_id)
+          .eq('commission_batch_items.batch_id', id)
+          .single();
+        const batchItem = Array.isArray((ce as any)?.commission_batch_items)
+          ? (ce as any).commission_batch_items[0]
+          : (ce as any)?.commission_batch_items;
+        if (ce && !ce.revenue_event_id && batchItem?.override_amount == null && ce.service_id) {
+          const { data: service } = await supabase
+            .from('deal_services')
+            .select('billing_type, billing_percentage, original_billing_percentage, is_renewal')
+            .eq('id', ce.service_id)
+            .single();
+          if (service?.billing_type === 'percentage_of_net_sales' && service.billing_percentage != null && service.billing_percentage > 0) {
+            const { data: rules } = await supabase
+              .from('commission_rules')
+              .select('base_rate')
+              .order('updated_at', { ascending: false })
+              .limit(1)
+              .single();
+            const baseRate = rules?.base_rate ?? 0.025;
+            const { computeNetSalesCommissionAmount } = await import('@/lib/commission/net-sales-commission');
+            const amountToSave = computeNetSalesCommissionAmount(
+              override_amount_collected,
+              service.billing_percentage,
+              baseRate,
+              {
+                isRenewal: !!(service.is_renewal === true || service.is_renewal === 1),
+                originalBillingPercentage: service.original_billing_percentage,
+              }
+            );
+            if (amountToSave != null) {
+              await supabase.from('commission_entries').update({ amount: amountToSave }).eq('id', commission_entry_id);
+            }
+          }
+        }
       }
       return apiSuccess({ success: true });
     }

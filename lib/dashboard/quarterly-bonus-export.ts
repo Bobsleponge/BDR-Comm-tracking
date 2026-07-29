@@ -135,7 +135,7 @@ export function fetchPayableBonusRowsLocal(
     INNER JOIN deals d ON ce.deal_id = d.id
     LEFT JOIN revenue_events re ON ce.revenue_event_id = re.id
     LEFT JOIN deal_services ds ON (re.service_id = ds.id OR ce.service_id = ds.id)
-    WHERE ce.bdr_id = ? AND ce.status != 'cancelled'
+    WHERE ce.bdr_id = ? AND ce.status NOT IN ('cancelled', 'ignored')
       AND ce.payable_date >= ? AND ce.payable_date <= ?
       AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date OR re.id IS NULL)
     ORDER BY ce.payable_date, ce.id
@@ -198,7 +198,7 @@ export function fetchClosedDealsBonusRowsLocal(
     SELECT DISTINCT ce.deal_id
     FROM commission_entries ce
     INNER JOIN deals d ON ce.deal_id = d.id
-    WHERE ce.bdr_id = ? AND ce.status != 'cancelled'
+    WHERE ce.bdr_id = ? AND ce.status NOT IN ('cancelled', 'ignored')
       AND ce.payable_date >= ? AND ce.payable_date <= ?
       AND d.cancellation_date IS NULL
   `

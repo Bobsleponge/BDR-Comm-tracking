@@ -74,6 +74,10 @@ function buildAnnualTierResponse(
     `Threshold: $${summary.threshold.toLocaleString('en-US')} | Tier 1: ${(summary.tier1Rate * 100).toFixed(1)}% | Tier 2: ${(summary.tier2Rate * 100).toFixed(1)}%`,
     `YTD collected: $${summary.revenueCollected.toFixed(2)} | Tier 1 revenue: $${summary.revenueInTier1.toFixed(2)} | Tier 2 revenue: $${summary.revenueInTier2.toFixed(2)}`,
     `Tier 1 commission: $${summary.tier1Commission.toFixed(2)} | Tier 2 commission: $${summary.tier2Commission.toFixed(2)} | Total modeled tier commission: $${summary.totalTierCommission.toFixed(2)}`,
+    `Year-end tier 2 uplift (${((summary.tier2Rate - summary.tier1Rate) * 100).toFixed(1)}% on tier 2 revenue): $${summary.tier2ExtraCommission.toFixed(2)}`,
+    `Projected year-end collected: $${summary.projectedRevenueCollected.toFixed(2)} | Tier 1 revenue: $${summary.projectedRevenueInTier1.toFixed(2)} | Tier 2 revenue: $${summary.projectedRevenueInTier2.toFixed(2)}`,
+    `Projected tier 1 commission: $${summary.projectedTier1Commission.toFixed(2)} | Projected tier 2 commission: $${summary.projectedTier2Commission.toFixed(2)} | Projected total modeled tier commission: $${summary.projectedTotalTierCommission.toFixed(2)}`,
+    `Projected year-end tier 2 uplift: $${summary.projectedTier2ExtraCommission.toFixed(2)}`,
     'Quarterly payable-date bonus is separate from this annual tier commission model.',
   ];
   const { rowsByMonth, sortedMonths } = groupAnnualTierRowsByMonth(rows);

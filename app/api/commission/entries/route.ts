@@ -3,8 +3,10 @@ import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
 import {
   normDateStr,
-  getLocalApprovalDisplaySets,
+  getLocalApprovalContext,
   isEntryApprovedForDisplay,
+  getEntryApprovalSource,
+  formatApprovalSourceLabel,
 } from '@/lib/commission/entry-approval-display';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -96,7 +98,19 @@ export async function GET(request: NextRequest) {
 
       const entries = db.prepare(query).all(...params) as any[];
 
-      const approvalSets = getLocalApprovalDisplaySets(db);
+      const { buildPaymentSequenceMapLocal, lookupPaymentSequence } = await import(
+        '@/lib/commission/enrich-payment-sequence'
+      );
+      const paymentSeqMap = buildPaymentSequenceMapLocal(
+        db,
+        entries.map((e: { id: string; service_id?: string; revenue_events_id?: string; revenue_events_service_id?: string }) => ({
+          commission_entry_id: e.id,
+          revenue_event_id: e.revenue_events_id ?? null,
+          service_id: e.revenue_events_service_id ?? e.service_id ?? null,
+        }))
+      );
+
+      const approvalSets = getLocalApprovalContext(db);
 
       let adjustmentByEntryId = new Map<string, import('@/lib/commission/export-rows').ReportAdjustmentMeta>();
       if (includeReportAdjustments) {
@@ -147,22 +161,23 @@ export async function GET(request: NextRequest) {
         const serviceIsRenewal = entry.deal_services_is_renewal === 1 || entry.deal_services_is_renewal === true;
         const dealIsRenewal = entry.deals_is_renewal === 1 || entry.deals_is_renewal === true;
         const isRenewal = serviceIsRenewal || dealIsRenewal;
-        const isApproved = isEntryApprovedForDisplay(
-          {
-            id: entry.id,
-            bdr_id: entry.bdr_id,
-            deal_id: entry.deal_id,
-            status: entry.status,
-            payable_date: entry.payable_date,
-            accrual_date: entry.accrual_date,
-            month: entry.month,
-          },
-          approvalSets
-        );
+        const entryForApproval = {
+          id: entry.id,
+          bdr_id: entry.bdr_id,
+          deal_id: entry.deal_id,
+          amount: Number(entry.amount),
+          status: entry.status,
+          payable_date: entry.payable_date,
+          accrual_date: entry.accrual_date,
+          month: entry.month,
+        };
+        const approvalSource = getEntryApprovalSource(entryForApproval, approvalSets);
+        const isApproved = approvalSource !== null;
         const reportAdj = includeReportAdjustments ? adjustmentByEntryId.get(entry.id) : undefined;
         return {
           ...entry,
           is_approved: isApproved,
+          approval_label: formatApprovalSourceLabel(approvalSource),
           ...(reportAdj ? { report_adjustment: reportAdj } : {}),
           is_renewal: isRenewal,
           deals: entry.deals_client_name ? {
@@ -173,6 +188,11 @@ export async function GET(request: NextRequest) {
             name: entry.bdr_reps_name,
             email: entry.bdr_reps_email,
           } : null,
+          payment_sequence: lookupPaymentSequence(
+            paymentSeqMap,
+            entry.revenue_events_id ?? null,
+            entry.id
+          ).label,
           revenue_events: entry.revenue_events_id ? {
             id: entry.revenue_events_id,
             service_id: entry.revenue_events_service_id,
@@ -181,6 +201,11 @@ export async function GET(request: NextRequest) {
             billing_type: entry.revenue_events_billing_type,
             payment_stage: entry.revenue_events_payment_stage,
             service_name: entry.deal_services_service_name,
+            payment_sequence: lookupPaymentSequence(
+              paymentSeqMap,
+              entry.revenue_events_id ?? null,
+              entry.id
+            ).label,
           } : null,
         };
       });

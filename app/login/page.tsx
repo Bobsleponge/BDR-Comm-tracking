@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,7 +20,28 @@ export default function LoginPage() {
   const [signupPassword, setSignupPassword] = useState('');
   const [signupLoading, setSignupLoading] = useState(false);
   const [signupError, setSignupError] = useState('');
-  const router = useRouter();
+
+  const waitForSession = async (): Promise<boolean> => {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const res = await fetch('/api/auth/user', { credentials: 'include' });
+      const data = await res.json().catch(() => null);
+      if (data?.user) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  };
+
+  const redirectAfterLogin = async () => {
+    const sessionReady = await waitForSession();
+    if (sessionReady) {
+      window.location.href = '/dashboard';
+      return;
+    }
+    setError('Login succeeded but the session was not established. Please try again.');
+    setLoading(false);
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,6 +52,7 @@ export default function LoginPage() {
       const res = await fetch('/api/auth/signin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
 
@@ -43,10 +64,7 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (data.user) {
-        // Wait a bit for cookie to be set, then redirect
-        await new Promise(resolve => setTimeout(resolve, 200));
-        // Force a full page reload to ensure cookies are set and middleware recognizes the session
-        window.location.href = '/dashboard';
+        await redirectAfterLogin();
       } else {
         setError('Login failed - no user returned');
         setLoading(false);
@@ -67,6 +85,7 @@ export default function LoginPage() {
       const res = await fetch('/api/auth/signin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email: quickEmail, password: 'password' }),
       });
 
@@ -78,10 +97,7 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (data?.user) {
-        // Wait a bit for cookie to be set, then redirect
-        await new Promise(resolve => setTimeout(resolve, 200));
-        // Force a full page reload to ensure cookies are set and middleware recognizes the session
-        window.location.href = '/dashboard';
+        await redirectAfterLogin();
       } else {
         setError('Login failed - no user returned');
         setLoading(false);

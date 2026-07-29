@@ -49,7 +49,7 @@ npm install
 npm run dev
 ```
 
-4. Open [http://localhost:3000](http://localhost:3000) in your browser.
+4. Open [http://localhost:3001](http://localhost:3001) in your browser.
 
 5. Login with test accounts:
    - **Admin**: `admin@example.com` (any password)
@@ -63,7 +63,7 @@ If the app doesn't launch properly with `npm run dev`, use Docker:
 
 1. Start Docker Desktop
 2. Run: `docker compose up --build -d`
-3. Open [http://localhost:3000](http://localhost:3000)
+3. Open [http://localhost:3001](http://localhost:3001)
 
 See [DOCKER.md](DOCKER.md) for full instructions.
 

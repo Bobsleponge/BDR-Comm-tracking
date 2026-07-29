@@ -1,7 +1,17 @@
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth } from '@/lib/utils/api-helpers';
-import { normDateStr, getLocalApprovalDisplaySets, isEntryApprovedForDisplay } from '@/lib/commission/entry-approval-display';
+import {
+  normDateStr,
+  getLocalApprovalContext,
+  isEntryApprovedForDisplay,
+  getEntryApprovalSource,
+  formatApprovalSourceLabel,
+} from '@/lib/commission/entry-approval-display';
+import {
+  collectPayableMonths,
+  getPayableMonthFromEntry,
+} from '@/lib/commission/payable-months';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -43,6 +53,7 @@ export async function GET(request: NextRequest) {
           ce.bdr_id,
           ce.deal_id as ce_deal_id,
           ce.revenue_event_id as revenue_event_id,
+          ce.service_id as ce_service_id,
           ce.amount,
           ce.status,
           ce.accrual_date,
@@ -72,7 +83,7 @@ export async function GET(request: NextRequest) {
         INNER JOIN deals d ON d.id = COALESCE(re.deal_id, ce.deal_id)
         LEFT JOIN deal_services ds ON re.service_id = ds.id
         WHERE d.cancellation_date IS NULL
-          AND ce.status != 'cancelled'
+          AND ce.status NOT IN ('cancelled', 'ignored')
       `;
 
       if (targetBdrId) {
@@ -94,7 +105,19 @@ export async function GET(request: NextRequest) {
 
       const entries = db.prepare(query).all(...params) as any[];
 
-      const approvalSets = getLocalApprovalDisplaySets(db);
+      const { buildPaymentSequenceMapLocal, lookupPaymentSequence } = await import(
+        '@/lib/commission/enrich-payment-sequence'
+      );
+      const paymentSeqMap = buildPaymentSequenceMapLocal(
+        db,
+        entries.map((e: { id: string; revenue_event_id?: string; service_id?: string; ce_service_id?: string }) => ({
+          commission_entry_id: e.id,
+          revenue_event_id: e.revenue_event_id ?? null,
+          service_id: e.service_id ?? e.ce_service_id ?? null,
+        }))
+      );
+
+      const approvalSets = getLocalApprovalContext(db);
 
       // Fallback: for entries with no service (no revenue_event or re.service_id null), get first service per deal
       const dealIdsNeedingService = [...new Set(entries.filter((e) => !e.service_id && e.deal_id).map((e) => e.deal_id))];
@@ -118,19 +141,7 @@ export async function GET(request: NextRequest) {
       }>();
 
       entries.forEach(entry => {
-        // paid_on_completion: always use payable_date (commission due 7 days after completion)
-        // Other types: payable_date first, then accrual_date, then month
-        const billingType = entry.billing_type ?? entry.revenue_billing_type;
-        const isPaidOnCompletion = billingType === 'paid_on_completion';
-        const payableMonth = (isPaidOnCompletion && entry.payable_date)
-          ? entry.payable_date.substring(0, 7)
-          : entry.payable_date
-            ? entry.payable_date.substring(0, 7)
-            : entry.accrual_date
-              ? entry.accrual_date.substring(0, 7)
-              : entry.month
-                ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
-                : 'unknown';
+        const payableMonth = getPayableMonthFromEntry(entry) ?? 'unknown';
 
         if (!breakdownByMonth.has(payableMonth)) {
           breakdownByMonth.set(payableMonth, {
@@ -161,18 +172,19 @@ export async function GET(request: NextRequest) {
           isRenewal && derivedUplift > 0
             ? derivedUplift
             : Number(entry.amount_collected ?? 0);
-        const isApproved = isEntryApprovedForDisplay(
-          {
-            id: entry.id,
-            bdr_id: entry.bdr_id,
-            deal_id: entry.ce_deal_id,
-            status: entry.status,
-            payable_date: entry.payable_date,
-            accrual_date: entry.accrual_date,
-            month: entry.month,
-          },
-          approvalSets
-        );
+        const entryForApproval = {
+          id: entry.id,
+          bdr_id: entry.bdr_id,
+          deal_id: entry.ce_deal_id,
+          amount: Number(entry.amount),
+          status: entry.status,
+          payable_date: entry.payable_date,
+          accrual_date: entry.accrual_date,
+          month: entry.month,
+        };
+        const approvalSource = getEntryApprovalSource(entryForApproval, approvalSets);
+        const isApproved = approvalSource !== null;
+        const approvalLabel = formatApprovalSourceLabel(approvalSource);
         // Generate unique ID: use commission entry ID if available, otherwise use revenue_event_id for scheduled entries
         const uniqueId = entry.id || (entry.revenue_event_id ? `scheduled-${entry.revenue_event_id}` : `scheduled-${entry.deal_id}-${entry.collection_date}`);
         monthData.entries.push({
@@ -180,6 +192,7 @@ export async function GET(request: NextRequest) {
           amount: Number(entry.amount),
           status: entry.status || (entry.source_type === 'scheduled_revenue' ? 'scheduled' : entry.status),
           isApproved,
+          approvalLabel,
           accrualDate: entry.accrual_date,
           payableDate: entry.payable_date,
           previousDealAmount: isRenewal ? previousDealAmount : null,
@@ -195,6 +208,11 @@ export async function GET(request: NextRequest) {
             const fb = fallbackServices.get(entry.deal_id);
             return fb ? { id: fb.id, name: fb.name, billingType: fb.billing_type } : null;
           })(),
+          paymentSequence: lookupPaymentSequence(
+            paymentSeqMap,
+            entry.revenue_event_id ?? null,
+            entry.id
+          ).label,
           revenueEvent: displayAmountCollected > 0 || entry.collection_date ? {
             amountCollected: displayAmountCollected,
             collectionDate: entry.collection_date,
@@ -208,36 +226,11 @@ export async function GET(request: NextRequest) {
       const breakdown = Array.from(breakdownByMonth.values())
         .sort((a, b) => a.month.localeCompare(b.month));
 
-      // #region agent log
-      const sampleEntries = breakdown.flatMap((m) => m.entries).slice(0, 8).map((e) => ({
-        dealId: e.deal?.id,
-        clientName: e.deal?.clientName,
-        serviceType: e.deal?.serviceType,
-        serviceName: e.service?.name,
-        serviceBilling: e.service?.billingType,
-      }));
-      const rawSample = entries.slice(0, 8).map((e) => ({
-        ce_id: e.id,
-        ce_deal_id: e.deal_id,
-        re_deal_id: e.re_deal_id,
-        deal_mismatch: e.re_deal_id && e.re_deal_id !== e.deal_id,
-        client_name: e.client_name,
-        deal_service_type: e.deal_service_type,
-        service_id: e.service_id,
-        service_name: e.service_name,
-      }));
-      const dealIds = [...new Set([
-        ...entries.filter((e) => e.re_deal_id).slice(0, 3).map((e) => e.re_deal_id),
-        ...entries.filter((e) => e.deal_id).slice(0, 3).map((e) => e.deal_id),
-      ])];
-      const dealInfoSample = dealIds.length > 0
-        ? db.prepare(`SELECT id, client_name, service_type FROM deals WHERE id IN (${dealIds.map(() => '?').join(',')})`).all(...dealIds) as any[]
-        : [];
-      fetch('http://127.0.0.1:7242/ingest/f0f85447-8287-450d-8621-69d25602cd44',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'breakdown/route.ts:local',message:'Breakdown sample',data:{sampleEntries,rawSample,dealInfoSample,totalEntries:entries.length},timestamp:Date.now(),hypothesisId:'breakdown'})}).catch(()=>{});
-      // #endregion
+      const payableMonths = collectPayableMonths(entries);
 
       return apiSuccess({
         breakdown,
+        payableMonths,
         total: entries.reduce((sum, e) => sum + Number(e.amount), 0),
         entryCount: entries.length,
       }, 200, { cache: 'no-store' }); // No cache to ensure fresh data
@@ -279,7 +272,7 @@ export async function GET(request: NextRequest) {
         )
       `)
       .is('deals.cancellation_date', null)
-      .neq('status', 'cancelled')
+      .in('status', ['payable', 'pending', 'accrued', 'paid'])
       .order('accrual_date', { ascending: true, nullsFirst: false })
       .order('payable_date', { ascending: true, nullsFirst: false });
 
@@ -379,18 +372,7 @@ export async function GET(request: NextRequest) {
     }>();
 
     filteredEntries.forEach((entry: any) => {
-      // paid_on_completion: always use payable_date (commission due 7 days after completion)
-      const entryBillingType = entry.revenue_events?.deal_services?.billing_type ?? entry.revenue_events?.billing_type;
-      const isPaidOnCompletion = entryBillingType === 'paid_on_completion';
-      const payableMonth = (isPaidOnCompletion && entry.payable_date)
-        ? entry.payable_date.substring(0, 7)
-        : entry.payable_date
-          ? entry.payable_date.substring(0, 7)
-          : entry.accrual_date
-            ? entry.accrual_date.substring(0, 7)
-            : entry.month
-              ? (typeof entry.month === 'string' ? entry.month.substring(0, 7) : entry.month)
-              : 'unknown';
+      const payableMonth = getPayableMonthFromEntry(entry) ?? 'unknown';
 
       if (!breakdownByMonth.has(payableMonth)) {
         breakdownByMonth.set(payableMonth, {
@@ -468,8 +450,11 @@ export async function GET(request: NextRequest) {
     const breakdown = Array.from(breakdownByMonth.values())
       .sort((a, b) => a.month.localeCompare(b.month));
 
+    const payableMonths = collectPayableMonths(filteredEntries);
+
     return apiSuccess({
       breakdown,
+      payableMonths,
       total: filteredEntries.reduce((sum: number, e: any) => sum + Number(e.amount), 0),
       entryCount: filteredEntries.length,
     }, 200, { cache: 'no-store' }); // No cache to ensure fresh data

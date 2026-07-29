@@ -2,7 +2,12 @@ import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { apiError, apiSuccess, requireAuth, canAccessBdr } from '@/lib/utils/api-helpers';
 import { dealServiceSchema } from '@/lib/commission/validators';
-import { calculateServiceCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
+import {
+  calculateServiceCommission,
+  calculateRenewalServiceCommission,
+  normalizeOriginalServiceValueForRenewal,
+} from '@/lib/commission/calculator';
+import { findDuplicateService } from '@/lib/deals/duplicate-service';
 
 const USE_LOCAL_DB = process.env.USE_LOCAL_DB === 'true' || !process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -112,16 +117,44 @@ export async function POST(
       const now = new Date().toISOString();
 
       const isRenewal = serviceData.is_renewal ? 1 : 0;
-      const originalServiceValue = serviceData.original_service_value ?? null;
+      const originalServiceValue = serviceData.original_service_value != null
+        ? normalizeOriginalServiceValueForRenewal(
+            serviceData.billing_type,
+            serviceData.original_service_value,
+            serviceData.quantity ?? 1
+          )
+        : null;
       let commissionableValue = commission.commissionable_value;
       let commissionAmount = commission.commission_amount;
       if (isRenewal && originalServiceValue != null) {
         const rate = serviceData.commission_rate ?? baseRate;
-        commissionAmount = Number(calculateRenewalCommission(
-          commission.commissionable_value,
-          originalServiceValue,
+        commissionAmount = calculateRenewalServiceCommission(
+          {
+            billing_type: serviceData.billing_type,
+            monthly_price: serviceData.monthly_price,
+            quarterly_price: serviceData.quarterly_price,
+            commissionable_value: commission.commissionable_value,
+            original_service_value: serviceData.original_service_value,
+            quantity: serviceData.quantity ?? 1,
+          },
           rate
-        ).toFixed(2));
+        );
+      }
+
+      const existingServices = db
+        .prepare('SELECT service_name, billing_type, commissionable_value FROM deal_services WHERE deal_id = ?')
+        .all(dealId) as Array<{ service_name: string; billing_type: string; commissionable_value: number }>;
+      const duplicate = findDuplicateService(
+        existingServices,
+        serviceData.service_name,
+        serviceData.billing_type,
+        commissionableValue
+      );
+      if (duplicate) {
+        return apiError(
+          `A "${serviceData.service_name}" service with the same billing type and value ($${Number(commissionableValue).toFixed(2)}) already exists on this deal. Edit the existing service instead of adding a duplicate.`,
+          409
+        );
       }
 
       const toBind = (v: any): string | number | null => (v === undefined ? null : (typeof v === 'boolean' ? (v ? 1 : 0) : v));
@@ -129,10 +162,10 @@ export async function POST(
         INSERT INTO deal_services (
           id, deal_id, service_name, service_type, billing_type, unit_price, monthly_price,
           quarterly_price, quantity, contract_months, contract_quarters,
-          commission_rate, billing_percentage, commissionable_value, commission_amount, completion_date,
+          commission_rate, billing_percentage, original_billing_percentage, commissionable_value, commission_amount, completion_date,
           is_renewal, original_service_value,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         serviceId,
         dealId,
@@ -147,6 +180,7 @@ export async function POST(
         serviceData.contract_quarters ?? 4,
         toBind(serviceData.commission_rate),
         toBind(serviceData.billing_percentage),
+        toBind(serviceData.original_billing_percentage),
         commissionableValue,
         commissionAmount,
         toBind(serviceData.completion_date),
@@ -167,24 +201,8 @@ export async function POST(
         await setDealFirstInvoiceDate(dealId, dateStr);
       }
 
-      // Reprocess deal so revenue events and commission entries include the new service
-      const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
-      db.prepare('DELETE FROM commission_entries WHERE deal_id = ?').run(dealId);
-      db.prepare('DELETE FROM revenue_events WHERE deal_id = ?').run(dealId);
-      await createRevenueEventsForDeal(dealId);
-      const revenueEvents = db.prepare('SELECT id FROM revenue_events WHERE deal_id = ?').all(dealId) as Array<{ id: string }>;
-      const processErrors: string[] = [];
-      for (const ev of revenueEvents) {
-        try {
-          await processRevenueEvent(ev.id);
-        } catch (err) {
-          processErrors.push((err as Error).message);
-          console.error(`[services POST] Failed to process revenue event ${ev.id}:`, err);
-        }
-      }
-      if (processErrors.length > 0) {
-        console.error(`[services POST] ${processErrors.length} commission entry/entries failed for deal ${dealId}:`, processErrors);
-      }
+      const { safeReprocessDeal } = await import('@/lib/commission/safe-reprocess');
+      await safeReprocessDeal(dealId);
 
       const newService = db.prepare('SELECT * FROM deal_services WHERE id = ?').get(serviceId) as any;
       return apiSuccess(newService, 201);
@@ -225,14 +243,26 @@ export async function POST(
     let commissionableValue = commission.commissionable_value;
     let commissionAmount = commission.commission_amount;
     const isRenewal = !!serviceData.is_renewal;
-    const originalServiceValue = serviceData.original_service_value ?? null;
+    const originalServiceValue = serviceData.original_service_value != null
+      ? normalizeOriginalServiceValueForRenewal(
+          serviceData.billing_type,
+          serviceData.original_service_value,
+          serviceData.quantity ?? 1
+        )
+      : null;
     if (isRenewal && originalServiceValue != null) {
       const rate = serviceData.commission_rate ?? baseRate;
-      commissionAmount = Number(calculateRenewalCommission(
-        commission.commissionable_value,
-        originalServiceValue,
+      commissionAmount = calculateRenewalServiceCommission(
+        {
+          billing_type: serviceData.billing_type,
+          monthly_price: serviceData.monthly_price,
+          quarterly_price: serviceData.quarterly_price,
+          commissionable_value: commission.commissionable_value,
+          original_service_value: serviceData.original_service_value,
+          quantity: serviceData.quantity ?? 1,
+        },
         rate
-      ).toFixed(2));
+      );
     }
 
     const insertPayload: Record<string, any> = {
@@ -248,6 +278,7 @@ export async function POST(
       contract_quarters: serviceData.contract_quarters,
       commission_rate: serviceData.commission_rate || null,
       billing_percentage: serviceData.billing_percentage ?? null,
+      original_billing_percentage: serviceData.original_billing_percentage ?? null,
       commissionable_value: commissionableValue,
       commission_amount: commissionAmount,
       completion_date: serviceData.completion_date || null,
@@ -255,6 +286,23 @@ export async function POST(
     if (isRenewal) {
       insertPayload.is_renewal = isRenewal;
       insertPayload.original_service_value = originalServiceValue;
+    }
+
+    const { data: existingServices } = await (supabase as any)
+      .from('deal_services')
+      .select('service_name, billing_type, commissionable_value')
+      .eq('deal_id', dealId);
+    const duplicate = findDuplicateService(
+      existingServices || [],
+      serviceData.service_name,
+      serviceData.billing_type,
+      commissionableValue
+    );
+    if (duplicate) {
+      return apiError(
+        `A "${serviceData.service_name}" service with the same billing type and value ($${Number(commissionableValue).toFixed(2)}) already exists on this deal. Edit the existing service instead of adding a duplicate.`,
+        409
+      );
     }
 
     const { data: newService, error } = await (supabase as any)
@@ -278,25 +326,8 @@ export async function POST(
       await setDealFirstInvoiceDate(dealId, dateStr);
     }
 
-    // Reprocess deal so revenue events and commission entries include the new service
-    const { createRevenueEventsForDeal, processRevenueEvent } = await import('@/lib/commission/revenue-events');
-    await (supabase as any).from('commission_entries').delete().eq('deal_id', dealId);
-    await (supabase as any).from('revenue_events').delete().eq('deal_id', dealId);
-    await createRevenueEventsForDeal(dealId);
-    const eventsResult = await (supabase as any).from('revenue_events').select('id').eq('deal_id', dealId);
-    const revenueEvents = eventsResult.data || [];
-    const processErrors: string[] = [];
-    for (const ev of revenueEvents) {
-      try {
-        await processRevenueEvent(ev.id);
-      } catch (err) {
-        processErrors.push((err as Error).message);
-        console.error(`[services POST] Failed to process revenue event ${ev.id}:`, err);
-      }
-    }
-    if (processErrors.length > 0) {
-      console.error(`[services POST] ${processErrors.length} commission entry/entries failed for deal ${dealId}:`, processErrors);
-    }
+    const { safeReprocessDeal } = await import('@/lib/commission/safe-reprocess');
+    await safeReprocessDeal(dealId);
 
     return apiSuccess(newService, 201);
   } catch (error: any) {

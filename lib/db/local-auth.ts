@@ -117,7 +117,10 @@ export async function createLocalSession(email: string, password: string): Promi
   };
 }
 
-export async function deleteLocalSession(sessionId: string): Promise<void> {
+export async function deleteLocalSession(sessionIdOrCookie: string): Promise<void> {
+  const sessionId = sessionIdOrCookie.includes(':')
+    ? sessionIdOrCookie.split(':')[0]
+    : sessionIdOrCookie;
   deleteSession(sessionId);
 }
 

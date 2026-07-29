@@ -150,6 +150,7 @@ export interface Database {
           id: string;
           bdr_id: string;
           run_date: string;
+          payable_cutoff: string | null;
           status: 'draft' | 'approved' | 'paid';
           created_at: string;
           updated_at: string;
@@ -165,6 +166,7 @@ export interface Database {
         Update: Partial<{
           bdr_id: string;
           run_date: string;
+          payable_cutoff: string | null;
           status: 'draft' | 'approved' | 'paid';
           created_at: string;
           updated_at: string;
@@ -178,6 +180,7 @@ export interface Database {
           override_amount: number | null;
           override_payment_date: string | null;
           override_commission_rate: number | null;
+          override_amount_collected: number | null;
           adjustment_note: string | null;
           created_at: string;
           updated_at: string;
@@ -199,6 +202,7 @@ export interface Database {
           override_amount: number | null;
           override_payment_date: string | null;
           override_commission_rate: number | null;
+          override_amount_collected: number | null;
           adjustment_note: string | null;
           created_at: string;
           updated_at: string;
@@ -219,6 +223,7 @@ export interface Database {
           contract_quarters: number;
           commission_rate: number | null;
           billing_percentage: number | null;
+          original_billing_percentage: number | null;
           commissionable_value: number;
           commission_amount: number;
           completion_date: string | null;
@@ -258,6 +263,7 @@ export interface Database {
           contract_quarters: number;
           commission_rate: number | null;
           billing_percentage: number | null;
+          original_billing_percentage: number | null;
           commissionable_value: number;
           commission_amount: number;
           completion_date: string | null;

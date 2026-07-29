@@ -1,6 +1,6 @@
 import { format } from 'date-fns';
 import { calculateTieredCommission, splitRevenueAcrossTiers } from '@/lib/commission/calculator';
-import { getLocalDB } from '@/lib/db/local-db';
+import { EXCLUDE_IGNORED_REVENUE_SQL } from '@/lib/commission/entry-source-sync';
 
 type LocalDb = ReturnType<typeof getLocalDB>;
 
@@ -46,8 +46,16 @@ export type AnnualTierSummary = {
   tier1Commission: number;
   tier2Commission: number;
   totalTierCommission: number;
+  tier2ExtraCommission: number;
   remainingToThreshold: number;
   inTier2: boolean;
+  projectedRevenueCollected: number;
+  projectedRevenueInTier1: number;
+  projectedRevenueInTier2: number;
+  projectedTier1Commission: number;
+  projectedTier2Commission: number;
+  projectedTotalTierCommission: number;
+  projectedTier2ExtraCommission: number;
 };
 
 export type AnnualTierProgress = {
@@ -59,6 +67,34 @@ export type AnnualTierProgress = {
 const DEFAULT_THRESHOLD = 250000;
 const DEFAULT_TIER_1_RATE = 0.025;
 const DEFAULT_TIER_2_RATE = 0.05;
+
+function tier2ExtraCommissionAmount(revenueInTier2: number, tier1Rate: number, tier2Rate: number): number {
+  const extraRate = Math.max(0, tier2Rate - tier1Rate);
+  return Number((revenueInTier2 * extraRate).toFixed(2));
+}
+
+function summarizeAnnualTierProgress(
+  progress: AnnualTierProgress,
+  projectedProgress: AnnualTierProgress
+): AnnualTierSummary {
+  const { rules, summary } = progress;
+  const projected = projectedProgress.summary;
+  return {
+    ...summary,
+    tier2ExtraCommission: tier2ExtraCommissionAmount(summary.revenueInTier2, rules.tier1Rate, rules.tier2Rate),
+    projectedRevenueCollected: projected.revenueCollected,
+    projectedRevenueInTier1: projected.revenueInTier1,
+    projectedRevenueInTier2: projected.revenueInTier2,
+    projectedTier1Commission: projected.tier1Commission,
+    projectedTier2Commission: projected.tier2Commission,
+    projectedTotalTierCommission: projected.totalTierCommission,
+    projectedTier2ExtraCommission: tier2ExtraCommissionAmount(
+      projected.revenueInTier2,
+      rules.tier1Rate,
+      rules.tier2Rate
+    ),
+  };
+}
 
 export function normalizeAnnualTierRules(rules?: {
   tier_1_threshold?: number | null;
@@ -136,8 +172,24 @@ export function buildAnnualTierProgress(
     tier1Commission: Number(tier1Commission.toFixed(2)),
     tier2Commission: Number(tier2Commission.toFixed(2)),
     totalTierCommission: Number((tier1Commission + tier2Commission).toFixed(2)),
+    tier2ExtraCommission: tier2ExtraCommissionAmount(
+      Number(revenueInTier2.toFixed(2)),
+      rules.tier1Rate,
+      rules.tier2Rate
+    ),
     remainingToThreshold: Number(Math.max(0, rules.threshold - revenueCollected).toFixed(2)),
     inTier2: revenueCollected > rules.threshold,
+    projectedRevenueCollected: revenueCollected,
+    projectedRevenueInTier1: Number(revenueInTier1.toFixed(2)),
+    projectedRevenueInTier2: Number(revenueInTier2.toFixed(2)),
+    projectedTier1Commission: Number(tier1Commission.toFixed(2)),
+    projectedTier2Commission: Number(tier2Commission.toFixed(2)),
+    projectedTotalTierCommission: Number((tier1Commission + tier2Commission).toFixed(2)),
+    projectedTier2ExtraCommission: tier2ExtraCommissionAmount(
+      Number(revenueInTier2.toFixed(2)),
+      rules.tier1Rate,
+      rules.tier2Rate
+    ),
   };
 
   return { rules, summary, rows: detailRows };
@@ -188,6 +240,7 @@ export function fetchAnnualTierCollectionRowsLocal(
       AND re.collection_date <= ?
       AND re.commissionable = 1
       AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date)
+      ${EXCLUDE_IGNORED_REVENUE_SQL}
     ORDER BY re.collection_date ASC, re.id ASC
   `
     )
@@ -231,6 +284,76 @@ export async function fetchAnnualTierCollectionRowsSupabase(
     });
 }
 
+export function fetchAnnualTierScheduledCollectionRowsLocal(
+  db: LocalDb,
+  bdrId: string,
+  yearStartStr: string,
+  yearEndStr: string,
+  todayStr: string
+): AnnualTierCollectionRow[] {
+  return db
+    .prepare(
+      `
+    SELECT
+      re.id,
+      re.collection_date,
+      re.amount_collected,
+      re.billing_type,
+      d.client_name,
+      COALESCE(ds.service_name, d.service_type, 'Deal') as deal
+    FROM revenue_events re
+    INNER JOIN deals d ON re.deal_id = d.id
+    LEFT JOIN deal_services ds ON re.service_id = ds.id
+    WHERE re.bdr_id = ?
+      AND re.collection_date > ?
+      AND re.collection_date >= ?
+      AND re.collection_date <= ?
+      AND re.commissionable = 1
+      AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date)
+      ${EXCLUDE_IGNORED_REVENUE_SQL}
+    ORDER BY re.collection_date ASC, re.id ASC
+  `
+    )
+    .all(bdrId, todayStr, yearStartStr, yearEndStr) as AnnualTierCollectionRow[];
+}
+
+export async function fetchAnnualTierScheduledCollectionRowsSupabase(
+  supabase: any,
+  bdrId: string,
+  yearStartStr: string,
+  yearEndStr: string,
+  todayStr: string
+): Promise<AnnualTierCollectionRow[]> {
+  const { data: rows } = await supabase
+    .from('revenue_events')
+    .select('id, collection_date, amount_collected, billing_type, deals!inner(client_name, service_type, cancellation_date)')
+    .eq('bdr_id', bdrId)
+    .gt('collection_date', todayStr)
+    .gte('collection_date', yearStartStr)
+    .lte('collection_date', yearEndStr)
+    .eq('commissionable', true)
+    .order('collection_date', { ascending: true })
+    .order('id', { ascending: true });
+
+  return (rows || [])
+    .filter((row: { collection_date?: string; deals?: unknown }) => {
+      const deal = Array.isArray(row.deals) ? row.deals[0] : row.deals;
+      const cancellationDate = (deal as { cancellation_date?: string } | null)?.cancellation_date;
+      return !cancellationDate || (row.collection_date && row.collection_date < cancellationDate);
+    })
+    .map((row: any) => {
+      const deal = Array.isArray(row.deals) ? row.deals[0] : row.deals;
+      return {
+        id: row.id,
+        collection_date: row.collection_date,
+        amount_collected: Number(row.amount_collected ?? 0),
+        billing_type: row.billing_type,
+        client_name: deal?.client_name ?? '',
+        deal: deal?.service_type || 'Deal',
+      } satisfies AnnualTierCollectionRow;
+    });
+}
+
 export function loadAnnualTierProgressLocal(
   db: LocalDb,
   bdrId: string,
@@ -240,8 +363,15 @@ export function loadAnnualTierProgressLocal(
   const yearStartStr = format(new Date(year, 0, 1), 'yyyy-MM-dd');
   const yearEndStr = format(new Date(year, 11, 31), 'yyyy-MM-dd');
   const rules = loadAnnualTierRulesLocal(db);
-  const rows = fetchAnnualTierCollectionRowsLocal(db, bdrId, yearStartStr, yearEndStr, todayStr);
-  return buildAnnualTierProgress(rows, rules, year);
+  const actualRows = fetchAnnualTierCollectionRowsLocal(db, bdrId, yearStartStr, yearEndStr, todayStr);
+  const scheduledRows = fetchAnnualTierScheduledCollectionRowsLocal(db, bdrId, yearStartStr, yearEndStr, todayStr);
+  const actualProgress = buildAnnualTierProgress(actualRows, rules, year);
+  const projectedProgress = buildAnnualTierProgress([...actualRows, ...scheduledRows], rules, year);
+  return {
+    rules,
+    rows: actualProgress.rows,
+    summary: summarizeAnnualTierProgress(actualProgress, projectedProgress),
+  };
 }
 
 export async function loadAnnualTierProgressSupabase(
@@ -253,8 +383,21 @@ export async function loadAnnualTierProgressSupabase(
   const yearStartStr = format(new Date(year, 0, 1), 'yyyy-MM-dd');
   const yearEndStr = format(new Date(year, 11, 31), 'yyyy-MM-dd');
   const rules = await loadAnnualTierRulesSupabase(supabase);
-  const rows = await fetchAnnualTierCollectionRowsSupabase(supabase, bdrId, yearStartStr, yearEndStr, todayStr);
-  return buildAnnualTierProgress(rows, rules, year);
+  const actualRows = await fetchAnnualTierCollectionRowsSupabase(supabase, bdrId, yearStartStr, yearEndStr, todayStr);
+  const scheduledRows = await fetchAnnualTierScheduledCollectionRowsSupabase(
+    supabase,
+    bdrId,
+    yearStartStr,
+    yearEndStr,
+    todayStr
+  );
+  const actualProgress = buildAnnualTierProgress(actualRows, rules, year);
+  const projectedProgress = buildAnnualTierProgress([...actualRows, ...scheduledRows], rules, year);
+  return {
+    rules,
+    rows: actualProgress.rows,
+    summary: summarizeAnnualTierProgress(actualProgress, projectedProgress),
+  };
 }
 
 export function groupAnnualTierRowsByMonth(rows: AnnualTierDetailRow[]): {
@@ -278,5 +421,5 @@ export function filenameForAnnualTierReport(year: number, fileFormat: 'csv' | 'x
 }
 
 export function annualTierBasisLabel(): string {
-  return 'Calendar-year commissionable cash collected through today. Revenue up to the annual threshold is modeled at tier 1; revenue above the threshold is modeled at tier 2. Quarterly payable-date bonus is separate.';
+  return 'Calendar-year commissionable cash collected through today. Revenue up to the annual threshold is modeled at tier 1; revenue above the threshold is modeled at tier 2. The extra 2.5% on tier 2 revenue is modeled as paid at year-end. Quarterly payable-date bonus is separate.';
 }

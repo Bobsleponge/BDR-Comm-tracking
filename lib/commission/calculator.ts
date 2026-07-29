@@ -300,6 +300,137 @@ export function splitRevenueAcrossTiers(
   return { tier1Revenue, tier2Revenue };
 }
 
+type RenewalBillingType = 'one_off' | 'mrr' | 'deposit' | 'quarterly' | 'paid_on_completion' | 'percentage_of_net_sales';
+
+/** Annualize renewal uplift for MRR (always 12 months, independent of contract_months). */
+export const RENEWAL_ARR_MONTHS = 12;
+/** Annualize renewal uplift for quarterly billing. */
+export const RENEWAL_ARR_QUARTERS = 4;
+
+export type RenewalServiceInput = {
+  billing_type: string;
+  monthly_price?: number | null;
+  quarterly_price?: number | null;
+  commissionable_value?: number | null;
+  original_service_value?: number | null;
+  quantity?: number;
+};
+
+/**
+ * Convert a per-period previous amount (monthly/quarterly/unit) to stored ARR basis.
+ */
+export function normalizeOriginalServiceValueForRenewal(
+  billingType: RenewalBillingType,
+  enteredValue: number,
+  quantity: number = 1
+): number {
+  if (billingType === 'mrr') {
+    return enteredValue * RENEWAL_ARR_MONTHS * quantity;
+  }
+  if (billingType === 'quarterly') {
+    return enteredValue * RENEWAL_ARR_QUARTERS * quantity;
+  }
+  return enteredValue * quantity;
+}
+
+/**
+ * Convert stored ARR basis back to per-period for form display.
+ */
+export function displayOriginalServiceValueForRenewal(
+  billingType: RenewalBillingType,
+  storedValue: number,
+  quantity: number = 1
+): number {
+  const divisor =
+    billingType === 'mrr'
+      ? RENEWAL_ARR_MONTHS * quantity
+      : billingType === 'quarterly'
+        ? RENEWAL_ARR_QUARTERS * quantity
+        : quantity;
+  return divisor > 0 ? storedValue / divisor : storedValue;
+}
+
+/** Whether a stored original_service_value looks like per-period input (legacy) vs ARR total. */
+function isStoredOriginalPerPeriod(
+  billingType: RenewalBillingType,
+  storedValue: number,
+  monthlyPrice?: number | null,
+  quarterlyPrice?: number | null
+): boolean {
+  if (billingType === 'mrr') {
+    const monthly = Number(monthlyPrice ?? 0);
+    return monthly > 0 && storedValue <= monthly * 1.5;
+  }
+  if (billingType === 'quarterly') {
+    const quarterly = Number(quarterlyPrice ?? 0);
+    return quarterly > 0 && storedValue <= quarterly * 1.5;
+  }
+  return false;
+}
+
+/**
+ * Resolve original_service_value to ARR/contract-total basis for display and one-off renewals.
+ */
+export function getCommissionableOriginalServiceValue(service: RenewalServiceInput): number {
+  const raw = Number(service.original_service_value ?? 0);
+  if (raw <= 0) return 0;
+
+  const billingType = service.billing_type as RenewalBillingType;
+  const qty = service.quantity ?? 1;
+
+  if (isStoredOriginalPerPeriod(billingType, raw, service.monthly_price, service.quarterly_price)) {
+    return normalizeOriginalServiceValueForRenewal(billingType, raw, qty);
+  }
+  return raw;
+}
+
+/** Per-period amount for form display (monthly for MRR, quarterly for quarterly, total otherwise). */
+export function getDisplayOriginalServiceValue(service: RenewalServiceInput): number | null {
+  const raw = service.original_service_value;
+  if (raw == null) return null;
+
+  const billingType = service.billing_type as RenewalBillingType;
+  const qty = service.quantity ?? 1;
+  const num = Number(raw);
+
+  if (isStoredOriginalPerPeriod(billingType, num, service.monthly_price, service.quarterly_price)) {
+    return num;
+  }
+  return displayOriginalServiceValueForRenewal(billingType, num, qty);
+}
+
+/**
+ * Renewal uplift on ARR: (new monthly × 12) − (old monthly × 12) for MRR.
+ * Uses current monthly/quarterly rates, not contract_months-scaled commissionable_value.
+ */
+export function getRenewalUpliftAmount(service: RenewalServiceInput): number {
+  const billingType = service.billing_type as RenewalBillingType;
+  const qty = service.quantity ?? 1;
+  const previous = getDisplayOriginalServiceValue(service);
+  if (previous == null) return 0;
+
+  if (billingType === 'mrr') {
+    const monthly = Number(service.monthly_price ?? 0);
+    return Math.max(0, monthly - previous) * RENEWAL_ARR_MONTHS * qty;
+  }
+  if (billingType === 'quarterly') {
+    const quarterly = Number(service.quarterly_price ?? 0);
+    return Math.max(0, quarterly - previous) * RENEWAL_ARR_QUARTERS * qty;
+  }
+
+  const current = Number(service.commissionable_value ?? 0);
+  const previousTotal = getCommissionableOriginalServiceValue(service);
+  return Math.max(0, current - previousTotal);
+}
+
+/** Commission on renewal uplift for a service. */
+export function calculateRenewalServiceCommission(
+  service: RenewalServiceInput,
+  rate: number
+): number {
+  return Number((getRenewalUpliftAmount(service) * rate).toFixed(2));
+}
+
 /**
  * Calculate renewal commission on uplift amount
  * Commission is 2.5% of the increase (renewal value - original value)

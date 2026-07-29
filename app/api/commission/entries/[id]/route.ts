@@ -45,12 +45,16 @@ export async function PATCH(
         if (!(await canAccessBdr(entry.bdr_id))) return apiError('Forbidden', 403);
         // Only allow for placeholder entries (revenue_event_id IS NULL) linked to a service
         if (entry.revenue_event_id) return apiError('Cannot update amount for auto-calculated entries; use override in batch', 400);
-        const service = entry.service_id ? db.prepare('SELECT billing_percentage FROM deal_services WHERE id = ?').get(entry.service_id) as any : null;
+        const service = entry.service_id ? db.prepare('SELECT billing_percentage, original_billing_percentage, is_renewal FROM deal_services WHERE id = ?').get(entry.service_id) as any : null;
         const billingPct = service?.billing_percentage;
         if (billingPct == null || billingPct <= 0) return apiError('Service billing percentage not configured', 400);
         const rules = db.prepare('SELECT base_rate FROM commission_rules LIMIT 1').get() as any;
         const baseRate = rules?.base_rate ?? 0.025;
-        amountToSave = Number((net_sales * billingPct * baseRate).toFixed(2));
+        const { computeNetSalesCommissionAmount } = await import('@/lib/commission/net-sales-commission');
+        amountToSave = computeNetSalesCommissionAmount(net_sales, billingPct, baseRate, {
+          isRenewal: !!(service?.is_renewal === 1 || service?.is_renewal === true),
+          originalBillingPercentage: service?.original_billing_percentage,
+        }) ?? 0;
       } else {
         const supabase = await createClient() as any;
         const { data: entry } = await supabase.from('commission_entries').select('*').eq('id', id).single();
@@ -58,13 +62,17 @@ export async function PATCH(
         if (!(await canAccessBdr(entry.bdr_id))) return apiError('Forbidden', 403);
         if (entry.revenue_event_id) return apiError('Cannot update amount for auto-calculated entries; use override in batch', 400);
         const { data: service } = entry.service_id
-          ? await supabase.from('deal_services').select('billing_percentage').eq('id', entry.service_id).single()
+          ? await supabase.from('deal_services').select('billing_percentage, original_billing_percentage, is_renewal').eq('id', entry.service_id).single()
           : { data: null };
         const billingPct = service?.billing_percentage;
         if (billingPct == null || billingPct <= 0) return apiError('Service billing percentage not configured', 400);
         const { data: rules } = await supabase.from('commission_rules').select('base_rate').order('updated_at', { ascending: false }).limit(1).single();
         const baseRate = rules?.base_rate ?? 0.025;
-        amountToSave = Number((net_sales * billingPct * baseRate).toFixed(2));
+        const { computeNetSalesCommissionAmount } = await import('@/lib/commission/net-sales-commission');
+        amountToSave = computeNetSalesCommissionAmount(net_sales, billingPct, baseRate, {
+          isRenewal: !!(service?.is_renewal === true || service?.is_renewal === 1),
+          originalBillingPercentage: service?.original_billing_percentage,
+        }) ?? 0;
       }
     }
 

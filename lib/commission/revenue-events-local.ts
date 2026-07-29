@@ -6,6 +6,7 @@
 import { getLocalDB } from '@/lib/db/local-db';
 import { generateUUID } from '@/lib/utils/uuid';
 import { parseISO, addDays, addMonths, startOfMonth, format } from 'date-fns';
+import { getCommissionableOriginalServiceValue, getRenewalUpliftAmount } from '@/lib/commission/calculator';
 
 export async function createRevenueEvent(
   dealId: string,
@@ -181,7 +182,7 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
     const isRenewalService = serviceMarkedRenewal;
     let originalServiceValue: number;
     if (isRenewalService && (service.original_service_value != null && service.original_service_value > 0)) {
-      originalServiceValue = Number(service.original_service_value);
+      originalServiceValue = getCommissionableOriginalServiceValue(service);
     } else if (isRenewalService && isRenewalDeal && dealOriginalValue > 0) {
       // Service marked renewal, derive original from deal.original_deal_value when no per-service value
       if (services.length === 1) {
@@ -191,15 +192,25 @@ export async function createRevenueEventsForDeal(dealId: string): Promise<void> 
         const proportion = totalDealCommissionableValue > 0 ? currentValue / totalDealCommissionableValue : 0;
         originalServiceValue = dealOriginalValue * proportion;
       }
-    } else if (isRenewalService) {
+    } else if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
       // Service marked renewal but no original value - skip to avoid commission on full amount
       continue;
+    } else if (isRenewalService && service.billing_type === 'percentage_of_net_sales') {
+      const prev = Number(service.original_billing_percentage ?? 0);
+      const curr = Number(service.billing_percentage ?? 0);
+      if (curr <= prev) continue;
     } else {
       originalServiceValue = 0; // Not a renewal - will use standard billing logic
     }
-    if (isRenewalService) {
-      const renewalServiceValue = Number(service.commissionable_value || 0);
-      const serviceUplift = Math.max(0, renewalServiceValue - originalServiceValue);
+    if (isRenewalService && service.billing_type !== 'percentage_of_net_sales') {
+      const serviceUplift = getRenewalUpliftAmount({
+        billing_type: service.billing_type,
+        monthly_price: service.monthly_price,
+        quarterly_price: service.quarterly_price,
+        commissionable_value: service.commissionable_value,
+        original_service_value: service.original_service_value ?? originalServiceValue,
+        quantity: service.quantity,
+      });
       if (serviceUplift > 0) {
         serviceAmount = serviceUplift;
         serviceBillingType = 'renewal';

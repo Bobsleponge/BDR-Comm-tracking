@@ -20,7 +20,7 @@ docker compose logs -f app
 docker compose down
 ```
 
-The app is mapped to **http://localhost:3001** (container still listens on 3000) so it can run alongside local `npm run dev` on port 3000. To use 3000 for Docker only, change `docker-compose.yml` to `"3000:3000"`.
+Local `npm run dev` uses **http://localhost:3001** so port 3000 can stay free for other apps. Docker defaults to **http://localhost:3000** (`"3000:3000"` in `docker-compose.yml`); change the host port if that conflicts.
 
 ## First Run
 

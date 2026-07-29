@@ -14,6 +14,10 @@ export async function GET(request: NextRequest) {
     await requireAuth();
     const { searchParams } = new URL(request.url);
     const bdrId = searchParams.get('bdr_id');
+    const today = new Date().toISOString().split('T')[0];
+    const payableCutoffParam = searchParams.get('payable_cutoff');
+    const payableCutoff =
+      payableCutoffParam && /^\d{4}-\d{2}-\d{2}$/.test(payableCutoffParam) ? payableCutoffParam : today;
 
     const { isAdmin, getBdrIdFromUser } = await import('@/lib/utils/auth');
     const isUserAdmin = await isAdmin();
@@ -36,6 +40,7 @@ export async function GET(request: NextRequest) {
       let query = `
         SELECT 
           ce.id,
+          ce.bdr_id,
           ce.deal_id,
           ce.amount,
           ce.status,
@@ -55,7 +60,7 @@ export async function GET(request: NextRequest) {
         LEFT JOIN revenue_events re ON ce.revenue_event_id = re.id
         LEFT JOIN deal_services ds ON re.service_id = ds.id
         WHERE ce.status IN ('payable', 'accrued', 'pending')
-          AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= date('now')
+          AND COALESCE(ce.payable_date, ce.accrual_date, ce.month || '-01') <= ?
           AND (ce.invoiced_batch_id IS NULL OR ce.invoiced_batch_id = '')
           AND NOT EXISTS (
             SELECT 1 FROM commission_batch_items cbi
@@ -69,14 +74,33 @@ export async function GET(request: NextRequest) {
           )
           AND d.cancellation_date IS NULL
       `;
-      const params: any[] = [];
+      const params: any[] = [payableCutoff];
       if (targetBdrId) {
         query += ' AND ce.bdr_id = ?';
         params.push(targetBdrId);
       }
       query += ' ORDER BY COALESCE(ce.payable_date, ce.accrual_date, ce.month) ASC';
 
-      const entries = db.prepare(query).all(...params) as any[];
+      const candidates = db.prepare(query).all(...params) as any[];
+
+      const { buildLocalBillableFilterContext, filterBillableEntries } = await import(
+        '@/lib/commission/filter-billable-entries'
+      );
+      const billableCtx = buildLocalBillableFilterContext(db);
+      const entries = filterBillableEntries(
+        candidates.map((e: any) => ({
+          id: e.id,
+          bdr_id: e.bdr_id ?? targetBdrId,
+          deal_id: e.deal_id,
+          amount: e.amount,
+          payable_date: e.payable_date,
+          accrual_date: e.accrual_date,
+          month: e.month,
+          status: e.status,
+          ...e,
+        })),
+        billableCtx
+      );
 
       return apiSuccess({
         data: entries,
@@ -87,7 +111,6 @@ export async function GET(request: NextRequest) {
     // Supabase mode: billable = due for payment, not in any batch (accepted report)
     const supabase = await createClient();
 
-    const today = new Date().toISOString().split('T')[0];
     let query = supabase
       .from('commission_entries')
       .select(`
@@ -122,7 +145,7 @@ export async function GET(request: NextRequest) {
       const effectiveDate = entry.payable_date
         || entry.accrual_date
         || (entry.month ? `${entry.month}-01` : null);
-      return effectiveDate && effectiveDate <= today;
+      return effectiveDate && effectiveDate <= payableCutoff;
     });
 
     // Exclude entries already in approved/paid reports

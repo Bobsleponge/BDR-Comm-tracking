@@ -4,7 +4,11 @@
  */
 
 import { addDays, addMonths, startOfMonth, parseISO, format } from 'date-fns';
-import { calculateServiceCommissionableValue } from './calculator';
+import {
+  calculateServiceCommissionableValue,
+  getCommissionableOriginalServiceValue,
+  getRenewalUpliftAmount,
+} from './calculator';
 
 export interface PreviewService {
   service_name: string;
@@ -155,7 +159,7 @@ export function calculateCommissionPreview(
 
     let originalServiceValue = 0;
     if (serviceMarkedRenewal && service.original_service_value != null && service.original_service_value > 0) {
-      originalServiceValue = Number(service.original_service_value);
+      originalServiceValue = getCommissionableOriginalServiceValue(service);
     } else if (isRenewalDeal && dealOriginalValue > 0) {
       if (services.length === 1) {
         originalServiceValue = dealOriginalValue;
@@ -171,7 +175,14 @@ export function calculateCommissionPreview(
     let serviceBillingType: string = service.billing_type === 'mrr' ? 'monthly' : service.billing_type === 'quarterly' ? 'quarterly' : 'one_off';
 
     if (isRenewalService) {
-      const uplift = Math.max(0, serviceAmount - originalServiceValue);
+      const uplift = getRenewalUpliftAmount({
+        billing_type: service.billing_type,
+        monthly_price: service.monthly_price,
+        quarterly_price: service.quarterly_price,
+        commissionable_value: serviceAmount,
+        original_service_value: service.original_service_value ?? originalServiceValue,
+        quantity: service.quantity,
+      });
       if (uplift <= 0) continue;
       serviceAmount = uplift;
       serviceBillingType = 'renewal';

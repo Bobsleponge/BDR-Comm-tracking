@@ -1,7 +1,7 @@
 import { format } from 'date-fns';
 import { getQuarterFromDate, parseQuarter } from '@/lib/commission/calculator';
 import {
-  getLocalApprovalDisplaySets,
+  getLocalApprovalContext,
   isEntryApprovedForDisplay,
   normDateStr,
 } from '@/lib/commission/entry-approval-display';
@@ -13,6 +13,7 @@ import {
   fetchPayableBonusRowsSupabase,
   type QuarterlyPayableProgressItem,
 } from '@/lib/dashboard/quarterly-bonus-export';
+import { EXCLUDE_IGNORED_REVENUE_SQL } from '@/lib/commission/entry-source-sync';
 import {
   loadAnnualTierProgressLocal,
   loadAnnualTierProgressSupabase,
@@ -210,7 +211,7 @@ function loadCommissionEntriesLocal(db: LocalDb, bdrId: string): CommissionEntry
       ce.month
     FROM commission_entries ce
     INNER JOIN deals d ON ce.deal_id = d.id
-    WHERE ce.bdr_id = ? AND d.cancellation_date IS NULL AND ce.status != 'cancelled'
+    WHERE ce.bdr_id = ? AND d.cancellation_date IS NULL AND ce.status NOT IN ('cancelled', 'ignored')
   `
     )
     .all(bdrId) as CommissionEntryRow[];
@@ -223,7 +224,7 @@ export function loadCommissionBucketsLocal(
   currentMonthStr: string,
   nextMonthStr: string
 ): DashboardCommissionBuckets {
-  const approvalSets = getLocalApprovalDisplaySets(db);
+  const approvalSets = getLocalApprovalContext(db);
   const batchAmountByEntryId = loadBatchAmountsLocal(db, bdrId);
   const entries = loadCommissionEntriesLocal(db, bdrId);
   return computeCommissionBucketsFromEntries(
@@ -366,6 +367,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
       WHERE re.bdr_id = ? AND re.collection_date >= ? AND re.collection_date <= ? AND re.collection_date <= ?
       AND re.commissionable = 1
       AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date)
+      ${EXCLUDE_IGNORED_REVENUE_SQL}
     `
         )
         .get(bdrId, yearStartStr, yearEndStr, todayStr) as { total: number } | undefined
@@ -382,6 +384,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
       WHERE re.bdr_id = ? AND re.collection_date >= ? AND re.collection_date <= ? AND re.collection_date <= ?
       AND re.commissionable = 1 AND re.billing_type != 'renewal'
       AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date)
+      ${EXCLUDE_IGNORED_REVENUE_SQL}
     `
         )
         .get(bdrId, yearStartStr, yearEndStr, todayStr) as { total: number } | undefined
@@ -398,6 +401,7 @@ export function loadDashboardStatsLocal(db: LocalDb, bdrId: string, today = new 
       WHERE re.bdr_id = ? AND re.collection_date >= ? AND re.collection_date <= ? AND re.collection_date <= ?
       AND re.commissionable = 1 AND re.billing_type = 'renewal'
       AND (d.cancellation_date IS NULL OR re.collection_date < d.cancellation_date)
+      ${EXCLUDE_IGNORED_REVENUE_SQL}
     `
         )
         .get(bdrId, yearStartStr, yearEndStr, todayStr) as { total: number } | undefined
@@ -512,20 +516,20 @@ async function loadSupabaseApprovalSets(supabase: any) {
     .from('approved_commission_fingerprints')
     .select('bdr_id, deal_id, effective_date');
 
-  const fpSet = new Set(
+  const fpSet = new Set<string>(
     (fingerprints || []).map(
       (fingerprint: { bdr_id: string; deal_id: string; effective_date: string }) =>
         `${fingerprint.bdr_id}|${fingerprint.deal_id}|${normDateStr(fingerprint.effective_date) || fingerprint.effective_date}`
     )
   );
-  const fpMonthSet = new Set(
+  const fpMonthSet = new Set<string>(
     (fingerprints || [])
       .map((fingerprint: { bdr_id: string; deal_id: string; effective_date: string }) => {
         const normalized = normDateStr(fingerprint.effective_date);
         const month = normalized && normalized.length >= 7 ? normalized.slice(0, 7) : '';
         return month ? `${fingerprint.bdr_id}|${fingerprint.deal_id}|${month}` : '';
       })
-      .filter(Boolean)
+      .filter((value: string) => Boolean(value))
   );
 
   return { approvedEntryIds, fpSet, fpMonthSet, batchAmountByEntryId };

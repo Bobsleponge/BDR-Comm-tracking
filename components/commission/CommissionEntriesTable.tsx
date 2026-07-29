@@ -23,8 +23,10 @@ interface CommissionEntry {
   amount: number | null;
   status: 'pending' | 'paid' | 'cancelled' | 'accrued' | 'payable';
   is_approved?: boolean;
+  approval_label?: string | null;
   accrual_date?: string | null;
   payable_date?: string | null;
+  payment_sequence?: string;
   report_adjustment?: {
     batch_id: string;
     change_summary: string | null;
@@ -41,6 +43,7 @@ interface CommissionEntry {
     amount_collected: number;
     collection_date: string;
     payment_stage?: string | null;
+    payment_sequence?: string | null;
   } | null;
 }
 
@@ -139,6 +142,7 @@ export function CommissionEntriesTable({
               <TableRow>
                 <TableHead>Client / Service</TableHead>
                 <TableHead>Payment Type</TableHead>
+                <TableHead>Payment</TableHead>
                 <TableHead>Collection Date</TableHead>
                 <TableHead>Payable Date</TableHead>
                 <TableHead>Amount</TableHead>
@@ -150,7 +154,7 @@ export function CommissionEntriesTable({
             <TableBody>
               {entries.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={isAdmin ? 8 : 7} className="text-center text-muted-foreground">
+                  <TableCell colSpan={isAdmin ? 9 : 8} className="text-center text-muted-foreground">
                     No commission entries found
                   </TableCell>
                 </TableRow>
@@ -199,6 +203,9 @@ export function CommissionEntriesTable({
                           )}
                           {getPaymentStageBadge(revenueEvent?.payment_stage)}
                         </div>
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-sm font-medium">
+                        {entry.payment_sequence ?? revenueEvent?.payment_sequence ?? '1 of 1'}
                       </TableCell>
                       <TableCell>
                         {entry.accrual_date 
@@ -284,12 +291,17 @@ export function CommissionEntriesTable({
                             {entry.status}
                           </Badge>
                           {entry.is_approved !== undefined && (
-                            <Badge
-                              variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
-                              className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600' : ''}
-                            >
-                              {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
-                            </Badge>
+                            <div className="flex flex-col gap-0.5">
+                              <Badge
+                                variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
+                                className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600 w-fit' : 'w-fit'}
+                              >
+                                {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
+                              </Badge>
+                              {isSettledForDisplay(entry) && entry.approval_label ? (
+                                <span className="text-xs text-muted-foreground">{entry.approval_label}</span>
+                              ) : null}
+                            </div>
                           )}
                         </div>
                       </TableCell>

@@ -4,6 +4,11 @@ import {
   calculateQuarterlyBonus,
   calculateTieredCommission,
   calculateRenewalCommission,
+  calculateRenewalServiceCommission,
+  normalizeOriginalServiceValueForRenewal,
+  getCommissionableOriginalServiceValue,
+  getDisplayOriginalServiceValue,
+  getRenewalUpliftAmount,
   getQuarterFromDate,
   parseQuarter,
   calculateDealCommission,
@@ -71,6 +76,42 @@ describe('Commission Calculator', () => {
       // 10000 at tier 2 (20000 - 10000) = 500
       // Total = 750
       expect(result).toBe(750);
+    });
+  });
+
+  describe('renewal original value normalization', () => {
+    const renewalService = {
+      billing_type: 'mrr' as const,
+      monthly_price: 895,
+      original_service_value: 500,
+      quantity: 1,
+    };
+
+    it('should annualize MRR previous monthly amount for uplift', () => {
+      const arr = normalizeOriginalServiceValueForRenewal('mrr', 500, 1);
+      expect(arr).toBe(6000);
+    });
+
+    it('should calculate ARR uplift from monthly rates regardless of contract_months', () => {
+      const uplift = getRenewalUpliftAmount(renewalService);
+      expect(uplift).toBe(4740);
+      const commission = calculateRenewalServiceCommission(renewalService, 0.025);
+      expect(commission).toBe(118.5);
+    });
+
+    it('should fix legacy MRR rows stored as monthly instead of ARR', () => {
+      const commissionable = getCommissionableOriginalServiceValue(renewalService);
+      expect(commissionable).toBe(6000);
+    });
+
+    it('should display stored ARR as monthly for MRR forms', () => {
+      const display = getDisplayOriginalServiceValue({
+        billing_type: 'mrr',
+        original_service_value: 6000,
+        monthly_price: 895,
+        quantity: 1,
+      });
+      expect(display).toBe(500);
     });
   });
 

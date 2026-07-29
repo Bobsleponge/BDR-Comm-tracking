@@ -16,8 +16,10 @@ interface CommissionBreakdownEntry {
   amount: number;
   status: string;
   isApproved?: boolean;
+  approvalLabel?: string | null;
   accrualDate: string | null;
   payableDate: string | null;
+  paymentSequence?: string;
   previousDealAmount?: number | null;
   newDealAmount?: number | null;
   deal: {
@@ -357,6 +359,7 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                           <TableHead>Client / Deal</TableHead>
                           <TableHead>Service</TableHead>
                           <TableHead>Payment Type</TableHead>
+                          <TableHead>Payment</TableHead>
                           <TableHead>Close Date</TableHead>
                           <TableHead>Payable Date</TableHead>
                           <TableHead>Revenue</TableHead>
@@ -412,6 +415,9 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                               </div>
                             </TableCell>
                             <TableCell>
+                              <span className="text-sm font-medium">{entry.paymentSequence || '1 of 1'}</span>
+                            </TableCell>
+                            <TableCell>
                               {entry.deal?.closeDate
                                 ? format(parseISO(entry.deal.closeDate), 'MMM dd, yyyy')
                                 : 'N/A'}
@@ -446,12 +452,17 @@ export function CommissionBreakdown({ breakdown, total, onFilterChange }: Commis
                             </TableCell>
                             <TableCell>
                               {entry.isApproved !== undefined ? (
-                                <Badge
-                                  variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
-                                  className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600' : ''}
-                                >
-                                  {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
-                                </Badge>
+                                <div className="flex flex-col gap-0.5">
+                                  <Badge
+                                    variant={isSettledForDisplay(entry) ? 'default' : 'secondary'}
+                                    className={isSettledForDisplay(entry) ? 'bg-green-600 hover:bg-green-600 w-fit' : 'w-fit'}
+                                  >
+                                    {entry.status === 'paid' ? 'Paid' : isSettledForDisplay(entry) ? 'Approved' : 'Pending'}
+                                  </Badge>
+                                  {isSettledForDisplay(entry) && entry.approvalLabel ? (
+                                    <span className="text-xs text-muted-foreground">{entry.approvalLabel}</span>
+                                  ) : null}
+                                </div>
                               ) : (
                                 <span className="text-muted-foreground text-sm">—</span>
                               )}

@@ -10,7 +10,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { ServiceForm } from './ServiceForm';
-import { calculateServiceCommission, calculateDealTotalCommission, calculateRenewalCommission } from '@/lib/commission/calculator';
+import {
+  calculateServiceCommission,
+  calculateDealTotalCommission,
+  calculateRenewalServiceCommission,
+  getCommissionableOriginalServiceValue,
+  normalizeOriginalServiceValueForRenewal,
+} from '@/lib/commission/calculator';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Trash2, Edit2, Plus } from 'lucide-react';
 
@@ -171,6 +177,10 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     contract_quarters: s.contract_quarters ?? 4,
     commission_rate: s.commission_rate ?? null,
     billing_percentage: s.billing_type === 'percentage_of_net_sales' ? (s.billing_percentage ?? null) : null,
+    original_billing_percentage:
+      s.billing_type === 'percentage_of_net_sales' && (s.is_renewal === true || s.is_renewal === 1)
+        ? (s.original_billing_percentage ?? null)
+        : null,
     completion_date: s.completion_date || null,
     is_renewal: !!(s.is_renewal === true || s.is_renewal === 1),
     original_service_value: (s.is_renewal === true || s.is_renewal === 1) ? (s.original_service_value ?? null) : null,
@@ -310,14 +320,26 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
     let commissionableValue = calc.commissionable_value;
     let commissionAmount = calc.commission_amount;
     const isRenewal = !!serviceData.is_renewal;
-    const originalServiceValue = serviceData.original_service_value ?? null;
+    const originalServiceValue = serviceData.original_service_value != null
+      ? normalizeOriginalServiceValueForRenewal(
+          serviceData.billing_type,
+          serviceData.original_service_value,
+          serviceData.quantity ?? 1
+        )
+      : null;
     if (isRenewal && originalServiceValue != null) {
       const rate = serviceData.commission_rate ?? baseCommissionRate;
-      commissionAmount = Number(calculateRenewalCommission(
-        calc.commissionable_value,
-        originalServiceValue,
+      commissionAmount = calculateRenewalServiceCommission(
+        {
+          billing_type: serviceData.billing_type,
+          monthly_price: serviceData.monthly_price,
+          quarterly_price: serviceData.quarterly_price,
+          commissionable_value: calc.commissionable_value,
+          original_service_value: serviceData.original_service_value,
+          quantity: serviceData.quantity ?? 1,
+        },
         rate
-      ).toFixed(2));
+      );
     }
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     setServices([...services, {
@@ -348,14 +370,26 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
       );
       let commissionAmount = calc.commission_amount;
       const isRenewal = !!serviceData.is_renewal;
-      const originalServiceValue = serviceData.original_service_value ?? null;
+      const originalServiceValue = serviceData.original_service_value != null
+        ? normalizeOriginalServiceValueForRenewal(
+            serviceData.billing_type,
+            serviceData.original_service_value,
+            serviceData.quantity ?? 1
+          )
+        : null;
       if (isRenewal && originalServiceValue != null) {
         const rate = serviceData.commission_rate ?? baseCommissionRate;
-        commissionAmount = Number(calculateRenewalCommission(
-          calc.commissionable_value,
-          originalServiceValue,
+        commissionAmount = calculateRenewalServiceCommission(
+          {
+            billing_type: serviceData.billing_type,
+            monthly_price: serviceData.monthly_price,
+            quarterly_price: serviceData.quarterly_price,
+            commissionable_value: calc.commissionable_value,
+            original_service_value: serviceData.original_service_value,
+            quantity: serviceData.quantity ?? 1,
+          },
           rate
-        ).toFixed(2));
+        );
       }
       const updated = {
         ...serviceData,
@@ -890,8 +924,8 @@ export function DealForm({ dealId, initialData, baseCommissionRate: propBaseRate
                   </div>
                   {(service.is_renewal === true || service.is_renewal === 1) && service.original_service_value != null && (
                     <div>
-                      <span className="text-gray-600">Previous Deal Amount:</span>
-                      <p className="font-medium">{formatCurrency(service.original_service_value)}</p>
+                      <span className="text-gray-600">Previous Contract Value:</span>
+                      <p className="font-medium">{formatCurrency(getCommissionableOriginalServiceValue(service))}</p>
                     </div>
                   )}
                   <div>

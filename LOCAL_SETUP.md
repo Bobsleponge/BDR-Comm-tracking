@@ -16,7 +16,7 @@ The app is now configured to work with a local SQLite database - no Docker or Su
    ```
 
 4. **Login:**
-   - Go to http://localhost:3000
+   - Go to http://localhost:3001
    - Use either test email (password can be anything for local dev)
    - Admin email gives you admin access
 
@@ -53,9 +53,20 @@ To use Supabase instead:
 2. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 3. Restart the app
 
-## Notes
+## Optional: AI note interpretation (Import Boss Update)
 
-- Passwords are ignored in local mode (any password works)
+Free-form boss notes in imported reports are interpreted via OpenAI when `OPENAI_API_KEY` is set in `.env.local` (Next.js loads this automatically on dev start).
+
+```bash
+OPENAI_API_KEY=sk-...
+# Optional: defaults to gpt-4o-mini
+OPENAI_MODEL=gpt-4o-mini
+```
+
+Without `OPENAI_API_KEY`, structured column diffs still work; free-form notes are flagged for manual review.
+
+**After adding or changing `.env.local`, restart the dev server** (`npm run dev`).
+
 - Sessions last 7 days
 - All data persists in `local.db` file
 - Database is gitignored (won't be committed)

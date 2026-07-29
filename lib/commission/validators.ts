@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+/** Accept boolean or SQLite-style 0/1 from local DB and forms. */
+const booleanishOptional = z.preprocess(
+  (val) => (val === undefined || val === null ? undefined : Boolean(val)),
+  z.boolean().optional()
+);
+
 /**
  * Schema for validating BDR rep data
  */
@@ -67,7 +73,7 @@ export const dealSchema = z.object({
   deal_value: z.number().min(0, 'Deal value must be positive'),
   original_deal_value: z.number().min(0).nullable().optional(),
   status: z.enum(['proposed', 'closed-won', 'closed-lost']).optional(),
-  is_renewal: z.boolean().optional(),
+  is_renewal: booleanishOptional,
   original_deal_id: z.preprocess((val) => (val === '' ? null : val), z.string().uuid().nullable().optional()),
   payout_months: z.number().int().positive().optional(),
 });
@@ -140,8 +146,9 @@ const dealServiceBaseSchema = z.object({
   contract_quarters: z.number().int().positive().default(4),
   commission_rate: z.number().min(0).max(1).nullable().optional(),
   billing_percentage: z.number().min(0).max(1).nullable().optional(),
+  original_billing_percentage: z.number().min(0).max(1).nullable().optional(),
   completion_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format').nullable().optional(),
-  is_renewal: z.boolean().optional(),
+  is_renewal: booleanishOptional,
   original_service_value: z.number().min(0).nullable().optional(),
 });
 
@@ -184,6 +191,19 @@ export const dealServiceSchema = dealServiceBaseSchema.refine((data) => {
 }, {
   message: 'Billing percentage (0-100%) is required for Percentage of Net Sales billing type',
   path: ['billing_percentage'],
+}).refine((data) => {
+  if (data.billing_type === 'percentage_of_net_sales' && data.is_renewal) {
+    return (
+      data.original_billing_percentage != null &&
+      data.original_billing_percentage >= 0 &&
+      data.billing_percentage != null &&
+      data.original_billing_percentage < data.billing_percentage
+    );
+  }
+  return true;
+}, {
+  message: 'Renewal pct-of-net-sales requires previous billing % lower than the new billing %',
+  path: ['original_billing_percentage'],
 });
 
 /**
